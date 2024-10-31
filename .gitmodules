@@ -1,0 +1,12 @@
+[submodule "lib/SDL"]
+	path = lib/SDL
+	url = git@github.com:libsdl-org/SDL.git
+[submodule "lib/imgui"]
+	path = lib/imgui
+	url = git@github.com:ocornut/imgui.git
+[submodule "lib/spdlog"]
+	path = lib/spdlog
+	url = git@github.com:gabime/spdlog.git
+[submodule "lib/OpenRGB-cppSDK"]
+	path = lib/OpenRGB-cppSDK
+	url = git@github.com:Youda008/OpenRGB-cppSDK.git

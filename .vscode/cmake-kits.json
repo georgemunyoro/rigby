@@ -1,0 +1,12 @@
+[
+  {
+    "name": "x86-Debug",
+    "compilers": {
+      "C": "clang",
+      "CXX": "clang++"
+    },
+    "preferredGenerator": {
+      "name": "Ninja"
+    }
+  }
+]
