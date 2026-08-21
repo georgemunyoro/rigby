@@ -179,10 +179,27 @@ frame is computed and sent into a void, and every phase offset between fans is
 invisible.
 
 A daisy-chain hub, or fans wired in series, does give each fan its own slice --
-that's `--fan-mode chained`. To find out which you have, run
-`--fan-mode chained --identify`: it walks the LEDs one at a time across all 18.
-If the same LED lights on every fan, the hub is a splitter; if the lit LED walks
-from fan to fan, it's chained.
+that's `--fan-mode chained`.
+
+### Finding out what's really on a header
+
+OpenRGB cannot see past the header. It reports whatever LED count the zone is
+configured for, and writes beyond the real chain vanish silently -- so a wrong
+count looks exactly like working code. The only way to establish the truth is to
+light things and look:
+
+```sh
+uv run rigby --probe 1 --probe-size 60      # motherboard zone 1
+```
+
+It resizes the zone, lights every LED at once (count how far the lit run
+reaches -- that's your real chain length), then walks one LED at a time. If the
+same position lights on *every* fan, the hub is a splitter and `--fan-mode
+mirrored` is right. If the lit LED moves from fan to fan, it's chained, and the
+index where it jumps to the next fan is your LEDs-per-fan.
+
+The original zone size is restored on exit, including on Ctrl-C. Back up
+`~/.config/OpenRGB/sizes.ors` first if you want a belt-and-braces undo.
 
 **A fan is a ring, not a strip.** Ring fixtures carry an `angle` per LED, a
 `spin` direction and an origin in the case, which is what makes rotation,

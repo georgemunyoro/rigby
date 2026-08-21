@@ -120,6 +120,15 @@ def main() -> int:
                          "so each gets its own slice")
     ap.add_argument("--swap-headers", action="store_true",
                     help="AIO and fan hub are on the other ARGB header")
+    ap.add_argument("--probe", metavar="ZONE",
+                    help="discover a header's real layout, e.g. --probe 1 "
+                         "(motherboard zone index, or 'Device name:zone')")
+    ap.add_argument("--probe-size", type=int, default=60,
+                    help="LED count to resize the zone to while probing")
+    ap.add_argument("--probe-step", type=float, default=0.45,
+                    help="seconds per LED during the walk")
+    ap.add_argument("--probe-mode", default="both",
+                    choices=["both", "all", "walk"])
     ap.add_argument("--identify", action="store_true",
                     help="walk the LEDs one at a time to map the patch")
     ap.add_argument("--source", default=None,
@@ -211,6 +220,11 @@ def main() -> int:
         return LOOKS[params.look](sink.fixtures, **kw)
 
     look = build_look()
+
+    if args.probe:
+        from .probe import run as probe_run
+        return probe_run(sink.client, args.probe, args.probe_size,
+                         args.probe_step, args.probe_mode)
 
     if args.identify:
         return _identify(sink)
