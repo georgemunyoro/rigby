@@ -192,6 +192,23 @@ wheel instead of flashing white. Two details make it work:
   reading as neither; the hue now swings fully and `lum_scale` decides how hard
   it lands.
 
+**Swings are rationed.** A colour change only has impact if it's rare, so
+ordinary beats get the plain flash and the swing is saved for hits that earn
+it. The test is relative -- beat your own recent neighbours on
+`onset_strength * dynamics` -- with a floor on spacing so it stays an event and
+a ceiling so it doesn't vanish on very even material. A fixed threshold cannot
+work across tracks: the top decile of impact is 0.95 on material with varied
+hits and 0.55 on a uniform four-to-the-floor, so any constant either swings on
+everything or on nothing.
+
+| track | beats | swings | swing impact vs all beats | mean gap |
+|---|---|---|---|---|
+| varied, with a quiet section | 46 | 5 (11%) | 0.72 vs 0.49 | 4.7s |
+| dense, uniform kicks | 69 | 8 (12%) | 0.53 vs 0.43 | 3.1s |
+
+None of the five swings on the first track land in its quiet section.
+`--swing-min-beats` tunes the rate (1 -> 52%, 3 -> 20%, 6 -> 11%, 12 -> 7%).
+
 It swings to the point opposite the pair's *midpoint*, not the complement of
 the primary -- the complement of the primary sits on top of the secondary,
 since the two tones are already about half a turn apart, so the "swing" would

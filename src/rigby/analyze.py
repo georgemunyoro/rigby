@@ -42,6 +42,7 @@ class Features:
     flux: float
     pulse: float = 0.0      # 0..1 confidence the track has a real beat
     swell: float = 0.0      # 0..1 sustained loudness -- the "belting" ramp
+    onset_strength: float = 0.0   # 0..1 size of this hit vs recent hits
 
 
 def default_monitor() -> str:
@@ -106,6 +107,8 @@ class Analyzer:
         self._pulse_hist: collections.deque[float] = collections.deque(
             maxlen=self.PULSE_WIN)
         self._pulse_tick = 0
+        self._onset_peaks: collections.deque[float] = collections.deque(maxlen=24)
+        self._onset_strength = 0.0
         self._ref_coef = 1.0 / (self.REF_TAU_S * fps)
         self._bass_env = 0.0
         self._level = 0.0
@@ -415,7 +418,8 @@ class Analyzer:
                         bands_slow=self._env_slow.copy(),
                         level=self._level, dynamics=dynamics, rms=rms,
                         bass=self._bass_env, onset=onset, flux=flux,
-                        pulse=self._pulse, swell=self._swell)
+                        pulse=self._pulse, swell=self._swell,
+                        onset_strength=(self._onset_strength if onset else 0.0))
 
     def _update_pulse(self, flux: float) -> None:
         """Beat confidence = periodicity of the onset envelope.
@@ -475,6 +479,18 @@ class Analyzer:
         std = float(np.std(window))
         if prev1 <= mean + self.ONSET_K * std or prev1 <= 1e-6:
             return False
+
+        # How big is this hit compared with the hits around it? Measured
+        # against recent accepted peaks rather than an absolute scale, so it
+        # still means something in a quiet passage.
+        if len(self._onset_peaks) >= 4:
+            med = float(np.median(self._onset_peaks))
+            self._onset_strength = float(np.clip(prev1 / max(med * 2.0, 1e-9),
+                                                 0.0, 1.0))
+        else:
+            self._onset_strength = 0.5
+        self._onset_peaks.append(prev1)
+
         self._since_onset = 0.0
         return True
 

@@ -7,6 +7,8 @@ LOOKS -- they all get the same (fixtures, features, phase) contract.
 
 from __future__ import annotations
 
+import collections
+
 import numpy as np
 
 from . import fx
@@ -26,7 +28,8 @@ class Look:
 
     def __init__(self, fixtures: dict[str, Fixture], palette: str = "sunset",
                  gain: float = 1.6, curve: float = 0.45, duo: str = "ember",
-                 hue_drift: float = 1.0, hit_style: str = "swing"):
+                 hue_drift: float = 1.0, hit_style: str = "swing",
+                 swing_min_beats: int = 6):
         self.fixtures = fixtures
         self.palette = palette
         self.gain = gain
@@ -37,6 +40,13 @@ class Look:
         self._sep_t = 0.0
         self._drift = hue_drift
         self.hit_style = hit_style
+        # A colour swing only has impact if it's rare. Ordinary beats get the
+        # ordinary flash; the swing is saved for the hits that earn it.
+        self.swing_min_beats = max(1, int(swing_min_beats))
+        self.swing_max_beats = self.swing_min_beats * 4
+        self._impacts: collections.deque[float] = collections.deque(maxlen=32)
+        self._since_swing = 999
+        self._swing_now = False
         self.t = 0.0          # global time in turns
         self.chase = 0.0      # chase phase in turns
         self._hit = 0.0       # onset flash envelope
@@ -70,6 +80,34 @@ class Look:
         """Flashes still land in quiet passages, just not at full power."""
         return 0.35 + 0.65 * f.dynamics
 
+    def note_onset(self, f: Features) -> None:
+        """Decide whether this beat is one of the ones that swings colour.
+
+        A fixed threshold doesn't work across material: on a track with varied
+        hits the top decile of impact is ~0.95, on a uniform four-to-the-floor
+        it's ~0.55, so any constant either swings on everything or on nothing.
+        The test is relative -- beat this well against its own recent
+        neighbours -- with a floor on spacing so it stays an event, and a
+        ceiling so it doesn't vanish entirely on very even material.
+        """
+        impact = f.onset_strength * (0.3 + 0.7 * f.dynamics)
+        self._impacts.append(impact)
+        self._since_swing += 1
+
+        if self._since_swing < self.swing_min_beats:
+            self._swing_now = False
+            return
+        if self._since_swing >= self.swing_max_beats:
+            self._swing_now = True
+            self._since_swing = 0
+            return
+
+        thresh = (float(np.percentile(self._impacts, 70))
+                  if len(self._impacts) >= 8 else 0.6)
+        self._swing_now = impact >= thresh
+        if self._swing_now:
+            self._since_swing = 0
+
     def hit_hue(self, h1: float, h2: float, hacc: float, beat: int) -> float:
         """Hue a beat swings to: opposite the pair's midpoint.
 
@@ -95,7 +133,9 @@ class Look:
         get away from -- the old accent-on-top flash trended white no matter
         which accent hue it used.
         """
-        if self.hit_style == "white":
+        # Ordinary beats keep the plain flash; only the ones that earned it
+        # swing the colour over.
+        if self.hit_style == "white" or not self._swing_now:
             return rgb + fx.hsv(hacc, 0.45, mask * lum_scale)
 
         # Colour weight and brightness are separate: the hue swings all the way
@@ -284,9 +324,11 @@ class Duotone(Look):
     name = "duotone"
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0, hit_style="swing"):
+                 duo="ember", hue_drift=1.0, hit_style="swing",
+                 swing_min_beats=6):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style,
+                         swing_min_beats=swing_min_beats)
         self.spin = 0.0
         self.dir = 1.0
         self.beat = 0
@@ -325,6 +367,7 @@ class Duotone(Look):
 
         if f.onset:
             self.beat += 1
+            self.note_onset(f)
             if self.beat % self.PHRASE_BEATS == 0:
                 self._new_gesture()
             if self._rings:
@@ -497,9 +540,11 @@ class Rain(Look):
     SWELL_EXP = 2.2
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0, hit_style="swing"):
+                 duo="ember", hue_drift=1.0, hit_style="swing",
+                 swing_min_beats=6):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style,
+                         swing_min_beats=swing_min_beats)
         self.drops = {k: _Drops(f.n, seed=i * 977 + 13, wrap=f.is_ring)
                       for i, (k, f) in enumerate(fixtures.items())}
         self._sw = 0.0
@@ -510,6 +555,7 @@ class Rain(Look):
         self._sw += (f.swell - self._sw) * 0.06
         if f.onset:
             self._beats += 1
+            self.note_onset(f)
         s = self._eff(self._sw)
         rate = self.BASE_RATE + s * self.PEAK_RATE
         amp = 0.45 + 0.55 * s
@@ -544,8 +590,10 @@ class Rain(Look):
             rgb = (fx.hsv((h1 + hj) % 1.0, 0.95, v0) +
                    fx.hsv((h2 + hj) % 1.0, 0.90, v1))
             if t2.max() > 1e-3:
-                hh = self.hit_hue(h1, h2, hacc, self._beats)
-                rgb = rgb + fx.hsv(hh, 1.0, self.drive(np.clip(t2, 0, 1)))
+                hh = (self.hit_hue(h1, h2, hacc, self._beats)
+                      if self._swing_now else hacc)
+                sat = 1.0 if self._swing_now else 0.5
+                rgb = rgb + fx.hsv(hh, sat, self.drive(np.clip(t2, 0, 1)))
             out[key] = np.clip(rgb * f.dynamics, 0.0, 1.0)
         return out
 
@@ -561,13 +609,15 @@ class Auto(Look):
     name = "auto"
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0, hit_style="swing"):
+                 duo="ember", hue_drift=1.0, hit_style="swing",
+                 swing_min_beats=6):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style,
+                         swing_min_beats=swing_min_beats)
         self.beaty = Duotone(fixtures, palette, gain, curve, duo, hue_drift,
-                             hit_style)
+                             hit_style, swing_min_beats)
         self.calm = Rain(fixtures, palette, gain, curve, duo, hue_drift,
-                         hit_style)
+                         hit_style, swing_min_beats)
         self.mix = 0.0
 
     def step(self, dt: float, f: Features) -> None:

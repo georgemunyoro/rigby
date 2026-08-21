@@ -85,6 +85,9 @@ def main() -> int:
                     choices=["swing", "accent", "white"],
                     help="what a beat does to colour: swing to the opposite of "
                          "the wheel, jump to the accent hue, or flash white")
+    ap.add_argument("--swing-min-beats", type=int, default=6,
+                    help="minimum beats between colour swings; ordinary beats "
+                         "get the plain flash")
     ap.add_argument("--hue-drift", type=float, default=1.0,
                     help="speed of the slow colour drift; 0 pins the tones")
     ap.add_argument("--onset-k", type=float, default=1.7,
@@ -121,6 +124,7 @@ def main() -> int:
         kw["duo"] = args.duo
         kw["hue_drift"] = args.hue_drift
         kw["hit_style"] = args.hit_style
+        kw["swing_min_beats"] = args.swing_min_beats
     look = LOOKS[args.look](sink.fixtures, **kw)
 
     if args.identify:
