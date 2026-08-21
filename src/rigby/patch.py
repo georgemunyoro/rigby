@@ -58,7 +58,6 @@ LEDS_PER_FAN = 6
 # effects can sweep across the whole rig rather than per-fixture.
 ORIGINS = {
     "fans":  (0.12, 0.50),
-    "fan_a": (0.12, 0.78), "fan_b": (0.12, 0.50), "fan_c": (0.12, 0.22),
     "aio":   (0.50, 0.85),
     "mobo":  (0.55, 0.50),
     "ram_a": (0.62, 0.72), "ram_b": (0.68, 0.72),
@@ -79,6 +78,18 @@ LINE_SPEC: list[tuple[str, str, int, int, bool]] = [
 def _ring_angles(n: int) -> np.ndarray:
     """0..1 turns around the ring, one step per LED."""
     return (np.arange(n, dtype=np.float32) / max(n, 1))
+
+
+def fan_name(i: int) -> str:
+    """fan_a .. fan_z, then fan_27 onward. Ten fans is not unusual."""
+    return f"fan_{chr(ord('a') + i)}" if i < 26 else f"fan_{i + 1}"
+
+
+def _fan_origin(i: int, total: int) -> tuple[float, float]:
+    """Stack the chain down the left of the case, first fan at the top."""
+    if total <= 1:
+        return (0.12, 0.5)
+    return (0.12, 0.90 - 0.80 * (i / (total - 1)))
 
 
 def _find(devices, match: str, occurrence: int = 0) -> int | None:
@@ -119,25 +130,28 @@ def resolve(devices, swap_headers: bool = False,
                 offset=base,
                 pos=np.linspace(0.0, 1.0, leds_per_fan, dtype=np.float32),
                 slow=False, kind=RING, angle=_ring_angles(leds_per_fan),
-                origin=ORIGINS["fan_b"], spin=1.0, mirror=reps)
+                origin=ORIGINS["fans"], spin=1.0, mirror=reps)
         elif hub_zone < len(zones) and len(zones[hub_zone].leds) >= fans * leds_per_fan:
             base = zone_offset(hub_zone)
-            for i in range(fans):
-                name = f"fan_{'abc'[i]}"
-                ang = _ring_angles(leds_per_fan)
+            # However many actually fit on the chain, not however many were
+            # asked for -- a wrong count silently addresses LEDs that aren't
+            # there.
+            room = len(zones[hub_zone].leds) // leds_per_fan
+            count = max(1, min(fans, room))
+            for i in range(count):
+                name = fan_name(i)
                 fixtures[name] = Fixture(
                     name=name, dev_idx=mb, zone_idx=hub_zone, n=leds_per_fan,
                     offset=base + i * leds_per_fan,
                     pos=np.linspace(0.0, 1.0, leds_per_fan, dtype=np.float32),
-                    slow=False, kind=RING, angle=ang,
-                    origin=ORIGINS[name],
-                    # Counter-rotate the middle fan: uniform spin across three
-                    # identical rings reads as one object, opposed spin reads
-                    # as three.
-                    spin=-1.0 if i == 1 else 1.0)
+                    slow=False, kind=RING, angle=_ring_angles(leds_per_fan),
+                    origin=_fan_origin(i, count),
+                    # Alternate spin down the chain: identical rings turning in
+                    # unison read as one object, opposed they read as many.
+                    spin=-1.0 if i % 2 else 1.0)
         else:
             missing += (["fans"] if fan_mode == "mirrored"
-                        else ["fan_a", "fan_b", "fan_c"])
+                        else [fan_name(i) for i in range(fans)])
 
         # --- the AIO pump head: one fine-grained ring ----------------------
         if aio_zone < len(zones) and len(zones[aio_zone].leds) > 0:

@@ -118,6 +118,10 @@ def main() -> int:
                     help="mirrored: a passive hub feeds every fan the same "
                          "signal (one ring). chained: fans pass data through, "
                          "so each gets its own slice")
+    ap.add_argument("--fans", type=int, default=3,
+                    help="fans daisy-chained on the hub header")
+    ap.add_argument("--leds-per-fan", type=int, default=6,
+                    help="LEDs in each fan's ring")
     ap.add_argument("--swap-headers", action="store_true",
                     help="AIO and fan hub are on the other ARGB header")
     ap.add_argument("--probe", metavar="ZONE",
@@ -186,7 +190,8 @@ def main() -> int:
     try:
         sink = Sink(args.host, args.port, gamma_val=args.gamma,
                     master=args.master, swap_headers=args.swap_headers,
-                    fan_mode=args.fan_mode)
+                    fan_mode=args.fan_mode, fans=args.fans,
+                    leds_per_fan=args.leds_per_fan)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
               f"is `openrgb --server` running?\n  {e}", file=sys.stderr)

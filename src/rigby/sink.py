@@ -32,11 +32,13 @@ class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
                  gamma_val: float = 2.2, master: float = 1.0,
                  swap_headers: bool = False, raw: bool = False,
-                 fan_mode: str = "mirrored"):
+                 fan_mode: str = "mirrored", fans: int = 3,
+                 leds_per_fan: int = 6):
         self.client = OpenRGBClient(host, port, "rigby")
         self.fixtures, self.missing = resolve(self.client.devices,
                                               swap_headers=swap_headers,
-                                              fan_mode=fan_mode)
+                                              fan_mode=fan_mode, fans=fans,
+                                              leds_per_fan=leds_per_fan)
         self.gamma = gamma_val
         self.master = master
         # Playground mode writes what you picked. Gamma is right for shaping an
