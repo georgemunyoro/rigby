@@ -171,6 +171,13 @@ class Analyzer:
     ONSET_K = 1.7        # threshold = mean + K * std of recent flux
     REFRACTORY_S = 0.11  # min gap between onsets (allows 16ths at 128bpm)
 
+    def set_offset(self, offset_ms: int) -> None:
+        """Retune the output-latency compensation while running."""
+        frames = max(0, int(offset_ms / 1000 * self.fps))
+        with self._lock:
+            self._delay_frames = frames
+            self._delay = collections.deque(self._delay, maxlen=max(1, frames + 1))
+
     def start(self) -> None:
         if self.source.startswith("file:"):
             path = self.source[5:]

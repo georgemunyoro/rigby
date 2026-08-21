@@ -25,6 +25,24 @@ uv run rigby --source file:track.mp3           # program a show against a known 
 
 Ctrl-C blacks out and exits.
 
+## Tuning it live
+
+```sh
+uv run rigby --look auto --control        # then open http://localhost:8721
+```
+
+Every knob is applied to the running show between frames -- no restart, so you
+don't lose the passage you were listening to. The page also shows what the
+analyser thinks is happening (bands, dynamics, swell, pulse, output level, beat
+flashes), because most tuning questions are really "is the analysis right or is
+the mapping wrong", and reading that off a number beats inferring it from the
+lights.
+
+Changing `look` or `duo` rebuilds the look; everything else is written straight
+onto the live objects. `--control-host 0.0.0.0` lets a phone on the same network
+reach it -- there is no authentication, so anyone who can reach the port can
+drive your lights. Localhost is the default for that reason.
+
 ### Too dim?
 
 ```sh

@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 from .analyze import Analyzer, Features, default_monitor
+from .control import REBUILD, ControlServer, Params, Telemetry
 from .show import LOOKS
 from .sink import Sink
 
@@ -28,6 +29,46 @@ def _meter(f, frame) -> None:
     print(f"\rin {db:7.1f} dBFS  dyn {f.dynamics:4.2f}  swell {f.swell:4.2f}  "
           f"pulse {f.pulse:4.2f}  bands [{bars}]  -> out {out_max:4.2f} "
           f"{'HIT' if f.onset else '   '}", end="", flush=True)
+
+
+def _apply_live(look, an, sink, params, dirty) -> None:
+    """Push changed knobs onto the running objects, no restart."""
+    p = params.snapshot()
+    for name in dirty:
+        val = p[name]
+        if name in ("gain", "curve", "saturation", "hot", "hit_style"):
+            for obj in _look_tree(look):
+                setattr(obj, name, val)
+        elif name == "hue_drift":
+            for obj in _look_tree(look):
+                obj._drift = val
+        elif name == "swing_min_beats":
+            for obj in _look_tree(look):
+                obj.swing_min_beats = max(1, int(val))
+                obj.swing_max_beats = max(1, int(val)) * 4
+        elif name == "palette":
+            for obj in _look_tree(look):
+                obj.palette = val
+        elif name == "master":
+            sink.master = val
+        elif name == "gamma":
+            sink.gamma = val
+            sink._last.clear()          # force a redraw at the new curve
+        elif name == "dynamics_db" and an is not None:
+            an.DYN_RANGE_DB = float(val)
+        elif name == "onset_k" and an is not None:
+            an.ONSET_K = float(val)
+        elif name == "offset_ms" and an is not None:
+            an.set_offset(int(val))
+
+
+def _look_tree(look):
+    """A look, plus the sub-looks `auto` mixes between."""
+    yield look
+    for attr in ("beaty", "calm"):
+        sub = getattr(look, attr, None)
+        if sub is not None:
+            yield sub
 
 
 def _identify(sink) -> int:
@@ -85,6 +126,12 @@ def main() -> int:
                     choices=["swing", "accent", "white"],
                     help="what a beat does to colour: swing to the opposite of "
                          "the wheel, jump to the accent hue, or flash white")
+    ap.add_argument("--control", nargs="?", const=8721, type=int, default=None,
+                    metavar="PORT",
+                    help="serve a live control UI (default port 8721)")
+    ap.add_argument("--control-host", default="127.0.0.1",
+                    help="bind address for the control UI; 0.0.0.0 exposes it "
+                         "to your network (no auth) so a phone can reach it")
     ap.add_argument("--saturation", type=float, default=0.88,
                     help="overall colour saturation, 0..1")
     ap.add_argument("--hot", type=float, default=0.5,
@@ -124,15 +171,26 @@ def main() -> int:
     print(f"patch ({sum(f.n for f in sink.fixtures.values())} leds live):")
     print(sink.describe(), flush=True)
 
-    kw = {"palette": args.palette, "gain": args.gain, "curve": args.curve}
-    if args.look in ("duotone", "rain", "auto"):
-        kw["duo"] = args.duo
-        kw["hue_drift"] = args.hue_drift
-        kw["hit_style"] = args.hit_style
-        kw["swing_min_beats"] = args.swing_min_beats
-        kw["saturation"] = args.saturation
-        kw["hot"] = args.hot
-    look = LOOKS[args.look](sink.fixtures, **kw)
+    params = Params(look=args.look, duo=args.duo, palette=args.palette,
+                    hit_style=args.hit_style, master=args.master,
+                    gain=args.gain, curve=args.curve, gamma=args.gamma,
+                    saturation=args.saturation, hot=args.hot,
+                    hue_drift=args.hue_drift, dynamics_db=args.dynamics_db,
+                    onset_k=args.onset_k,
+                    swing_min_beats=args.swing_min_beats,
+                    offset_ms=args.offset_ms)
+
+    def build_look():
+        kw = {"palette": params.palette, "gain": params.gain,
+              "curve": params.curve}
+        if params.look in ("duotone", "rain", "auto"):
+            kw.update(duo=params.duo, hue_drift=params.hue_drift,
+                      hit_style=params.hit_style,
+                      swing_min_beats=params.swing_min_beats,
+                      saturation=params.saturation, hot=params.hot)
+        return LOOKS[params.look](sink.fixtures, **kw)
+
+    look = build_look()
 
     if args.identify:
         return _identify(sink)
@@ -165,6 +223,22 @@ def main() -> int:
                   file=sys.stderr)
             an = None
 
+    telem = Telemetry()
+    control = None
+    if args.control:
+        try:
+            control = ControlServer(params, telem, sink.describe(),
+                                    host=args.control_host, port=args.control)
+            control.start()
+            where = ("localhost" if args.control_host in ("127.0.0.1", "localhost")
+                     else args.control_host)
+            print(f"control ui: http://{where}:{control.port}"
+                  + ("  (exposed to your network, no auth)"
+                     if args.control_host == "0.0.0.0" else ""), flush=True)
+        except OSError as e:
+            print(f"could not start control ui on port {args.control}: {e}",
+                  file=sys.stderr)
+
     print(f"look={args.look} palette={args.palette}  -- ctrl-c to blackout",
           flush=True)
 
@@ -180,6 +254,8 @@ def main() -> int:
 
     quiet_for = 0
     warned = False
+    frames = 0
+    last_report = time.monotonic()
     silent = Features(bands=np.zeros(8, dtype=np.float32),
                       bands_slow=np.zeros(8, dtype=np.float32),
                       level=0.0, dynamics=0.0, rms=0.0,
@@ -216,17 +292,42 @@ def main() -> int:
                           f"--meter", file=sys.stderr, flush=True)
                     warned = True
 
+            # Live knobs: applied between frames, so nothing has to restart.
+            dirty = params.take_dirty()
+            if dirty:
+                if dirty & REBUILD:
+                    look = build_look()
+                else:
+                    _apply_live(look, an, sink, params, dirty)
+
             look.step(dt, f)
             frame = look.render(f)
+            if params.blackout:
+                frame = {k: v * 0.0 for k, v in frame.items()}
 
             if args.meter:
                 _meter(f, frame)
             else:
                 sink.write(frame)
 
+            if control is not None:
+                frames += 1
+                now = time.monotonic()
+                if now - last_report >= 0.2:
+                    telem.set(fps=frames / max(now - last_report, 1e-6),
+                              dbfs=(20 * np.log10(max(f.rms, 1e-9))),
+                              level=f.level, dynamics=f.dynamics,
+                              swell=f.swell, pulse=f.pulse, onset=bool(f.onset),
+                              bands=[float(x) for x in f.bands],
+                              out=max((float(v.max()) for v in frame.values()),
+                                      default=0.0))
+                    frames, last_report = 0, now
+
             if args.seconds and time.monotonic() - started >= args.seconds:
                 break
     finally:
+        if control is not None:
+            control.stop()
         if an is not None:
             an.stop()
         sink.blackout()
