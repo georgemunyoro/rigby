@@ -14,14 +14,22 @@ def to_led(v, g=2.2, master=1.0):
     return np.clip(np.where(lit, raw, 0.0)+0.5, 0, 255).astype(np.uint8)
 
 def fake_fixtures():
-    def fx(name, n, slow=False, rev=False):
-        pos = np.linspace(0,1,n) if n>1 else np.array([0.5])
-        if rev: pos = pos[::-1].copy()
-        return Fixture(name,0,0,n,0,pos,slow,rev)
-    return {"mobo":fx("mobo",4), "truss_l":fx("truss_l",18),
-            "truss_r":fx("truss_r",18,rev=True),
-            "ram_a":fx("ram_a",8,slow=True), "ram_b":fx("ram_b",8,slow=True),
-            "gpu":fx("gpu",1,slow=True)}
+    """Mirrors the real patch: 3 fan rings of 6, an 18-LED AIO ring, lines."""
+    from rigby.patch import RING, LINE, ORIGINS
+    def ring(name, n, spin=1.0):
+        return Fixture(name,0,0,n,0,np.linspace(0,1,n,dtype=np.float32),False,
+                       kind=RING, angle=(np.arange(n,dtype=np.float32)/n),
+                       origin=ORIGINS.get(name,(0.5,0.5)), spin=spin)
+    def line(name, n, slow=False):
+        pos = np.linspace(0,1,n,dtype=np.float32) if n>1 else np.array([0.5],dtype=np.float32)
+        return Fixture(name,0,0,n,0,pos,slow,kind=LINE,
+                       origin=ORIGINS.get(name,(0.5,0.5)))
+    return {"fan_a":ring("fan_a",6), "fan_b":ring("fan_b",6,-1.0),
+            "fan_c":ring("fan_c",6), "aio":ring("aio",18,-1.0),
+            "mobo":line("mobo",4), "ram_a":line("ram_a",8,slow=True),
+            "ram_b":line("ram_b",8,slow=True), "gpu":line("gpu",1,slow=True)}
+
+SCORE_FIX = "aio"
 
 def run(path, gt, look_name="spectrum", **kw):
     an = Analyzer(f"file:{path}", fps=60, play=False); an.start()
@@ -38,7 +46,7 @@ def run(path, gt, look_name="spectrum", **kw):
         fr = look.render(f)
         t = i/fps
         if f.onset: onsets.append(t)
-        led = to_led(fr["truss_l"]).astype(np.float32)
+        led = to_led(fr[SCORE_FIX]).astype(np.float32)
         v = float(led.mean())                       # 0..255 as the LED sees it
         bright.append((t, v)); frames.append(led)
         i+=1

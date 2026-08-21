@@ -25,9 +25,29 @@ def _meter(f, frame) -> None:
     db = 20 * np.log10(max(f.rms, 1e-9))
     bars = "".join("_.:-=+*#"[min(7, int(b * 8))] for b in f.bands)
     out_max = max((float(v.max()) for v in frame.values()), default=0.0)
-    print(f"\rin {db:7.1f} dBFS  lvl {f.level:4.2f}  dyn {f.dynamics:4.2f}  "
-          f"bands [{bars}]  -> out {out_max:4.2f} "
+    print(f"\rin {db:7.1f} dBFS  dyn {f.dynamics:4.2f}  swell {f.swell:4.2f}  "
+          f"pulse {f.pulse:4.2f}  bands [{bars}]  -> out {out_max:4.2f} "
           f"{'HIT' if f.onset else '   '}", end="", flush=True)
+
+
+def _identify(sink) -> int:
+    """Walk one LED at a time so the physical patch can be read off the case."""
+    import numpy as _np
+    print("\nlighting one LED at a time -- watch which fixture responds\n")
+    for name, fix in sink.fixtures.items():
+        print(f"  {name} ({fix.kind}, {fix.n} leds)", flush=True)
+        for i in range(fix.n):
+            frame = {k: _np.zeros((f.n, 3), dtype=_np.float32)
+                     for k, f in sink.fixtures.items()}
+            frame[name][i] = (1.0, 1.0, 1.0)
+            sink._last.clear(); sink._next.clear()
+            sink.write(frame)
+            print(f"    led {i}", end="\r", flush=True)
+            time.sleep(0.45)
+        print("            ", end="\r")
+    sink.blackout()
+    print("done.")
+    return 0
 
 
 def main() -> int:
@@ -35,6 +55,13 @@ def main() -> int:
     ap.add_argument("--look", default="spectrum", choices=sorted(LOOKS))
     ap.add_argument("--palette", default="sunset",
                     choices=["sunset", "cyanmag", "acid", "ice"])
+    ap.add_argument("--duo", default="ember",
+                    choices=["ember", "toxic", "vapor", "cobalt", "mono"],
+                    help="two-tone pair for the duotone look")
+    ap.add_argument("--swap-headers", action="store_true",
+                    help="AIO and fan hub are on the other ARGB header")
+    ap.add_argument("--identify", action="store_true",
+                    help="walk the LEDs one at a time to map the patch")
     ap.add_argument("--source", default=None,
                     help="PipeWire source, or file:PATH.wav "
                          "(default: current sink's .monitor)")
@@ -51,7 +78,7 @@ def main() -> int:
                     help="brightness curve; <1 lifts the low end (0.5 = punchy)")
     ap.add_argument("--play", action=argparse.BooleanOptionalAction, default=None,
                     help="play a file: source out loud (default: on for files)")
-    ap.add_argument("--dynamics-db", type=float, default=22.0,
+    ap.add_argument("--dynamics-db", type=float, default=15.0,
                     help="dB below the running reference that reads as dark; "
                          "higher = flatter, lower = more dramatic")
     ap.add_argument("--onset-k", type=float, default=1.7,
@@ -68,7 +95,8 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        sink = Sink(args.host, args.port, gamma_val=args.gamma, master=args.master)
+        sink = Sink(args.host, args.port, gamma_val=args.gamma,
+                    master=args.master, swap_headers=args.swap_headers)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
               f"is `openrgb --server` running?\n  {e}", file=sys.stderr)
@@ -82,8 +110,13 @@ def main() -> int:
     print(f"patch ({sum(f.n for f in sink.fixtures.values())} leds live):")
     print(sink.describe(), flush=True)
 
-    look = LOOKS[args.look](sink.fixtures, palette=args.palette,
-                            gain=args.gain, curve=args.curve)
+    kw = {"palette": args.palette, "gain": args.gain, "curve": args.curve}
+    if args.look in ("duotone", "rain", "auto"):
+        kw["duo"] = args.duo
+    look = LOOKS[args.look](sink.fixtures, **kw)
+
+    if args.identify:
+        return _identify(sink)
 
     an = None
     if not args.no_audio:

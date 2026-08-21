@@ -69,6 +69,35 @@ def htp(*layers: np.ndarray) -> np.ndarray:
     return out
 
 
+# -------------------------------------------------------------- geometry --
+
+def wrap_delta(a, b):
+    """Shortest signed distance from b to a, in turns, in (-0.5, 0.5]."""
+    return ((np.asarray(a, dtype=np.float32) - b + 0.5) % 1.0) - 0.5
+
+
+def arc(angle: np.ndarray, centre: float, width: float = 0.22,
+        softness: float = 1.0) -> np.ndarray:
+    """A lit arc of a ring, centred at `centre` turns, `width` turns wide.
+
+    This is the ring equivalent of a travelling bump, and it's the primitive
+    that makes fans read as rotating objects rather than as blinking dots.
+    """
+    d = np.abs(wrap_delta(angle, centre))
+    v = np.clip(1.0 - d / max(width, 1e-4), 0.0, 1.0)
+    return v ** max(softness, 1e-3)
+
+
+def half(angle: np.ndarray, centre: float, feather: float = 0.06) -> np.ndarray:
+    """The half of a ring centred on `centre`, with a soft edge.
+
+    Used to flash one side of a fan on a beat while the other side keeps
+    running its own effect.
+    """
+    d = np.abs(wrap_delta(angle, centre))
+    return np.clip((0.25 - d) / max(feather, 1e-4) + 0.5, 0.0, 1.0)
+
+
 # ------------------------------------------------------------------ colour --
 
 def hsv(h, s, v) -> np.ndarray:
@@ -119,6 +148,17 @@ PALETTES = {
     "cyanmag": [0.50, 0.83, 0.58, 0.90],
     "acid":    [0.28, 0.16, 0.45, 0.36],
     "ice":     [0.55, 0.60, 0.48, 0.70],
+}
+
+# Two-tone pairs: (primary, secondary, accent-for-hits). Chosen so the two
+# tones stay distinguishable on a 6-LED ring -- adjacent hues just read as one
+# muddy colour at that resolution, so every pair is well separated on the wheel.
+DUOS = {
+    "ember":   (0.03, 0.58, 0.10),   # orange / blue, gold hits
+    "toxic":   (0.28, 0.80, 0.16),   # green / violet, yellow hits
+    "vapor":   (0.86, 0.52, 0.95),   # magenta / cyan, pink hits
+    "cobalt":  (0.60, 0.11, 0.50),   # blue / amber, teal hits
+    "mono":    (0.00, 0.00, 0.00),   # single hue, brightness only
 }
 
 

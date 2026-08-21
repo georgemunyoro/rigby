@@ -14,6 +14,9 @@ openrgb --server            # headless, listens on 6742
 Then:
 
 ```sh
+uv run rigby --look auto                       # picks its own behaviour (start here)
+uv run rigby --look duotone                    # two-tone rotating rings, beat-driven
+uv run rigby --look rain                       # sparse drops that ramp on swells
 uv run rigby                                   # spectrum look, taps your default sink
 uv run rigby --look chase --no-audio           # rig check, no audio needed
 uv run rigby --palette cyanmag --master 0.6
@@ -111,19 +114,92 @@ Anything not currently plugged in is skipped with a note at startup.
 Current patch on this machine (57 LEDs live, 183 with the USB keyboard in):
 
 ```
-mobo      4 led   hid 60fps    Aura Mainboard
-truss_l  18 led   hid 60fps    Aura Addressable 1
-truss_r  18 led   hid 60fps    Aura Addressable 2
-ram_a     8 led   i2c 12fps    ENE DRAM
-ram_b     8 led   i2c 12fps    ENE DRAM
-gpu       1 led   i2c 12fps    Palit RTX 3080
-kbd     126 led   hid 60fps    EVision / Redragon Mitra (USB only)
+fan_a     6 led ring   hid 60fps    fan hub, Aura Addressable 1
+fan_b     6 led ring   hid 60fps    fan hub   (counter-rotates)
+fan_c     6 led ring   hid 60fps    fan hub
+aio      18 led ring   hid 60fps    AIO pump head, Aura Addressable 2
+mobo      4 led line   hid 60fps    Aura Mainboard
+ram_a     8 led line   i2c 12fps    ENE DRAM
+ram_b     8 led line   i2c 12fps    ENE DRAM
+gpu       1 led line   i2c 12fps    Palit RTX 3080
+kbd     126 led line   hid 60fps    EVision / Redragon Mitra (USB only)
 ```
+
+**A fan is a ring, not a strip.** Ring fixtures carry an `angle` per LED, a
+`spin` direction and an origin in the case, which is what makes rotation,
+half-ring splits and per-fan phase offsets expressible at all. Fan count and
+LEDs-per-fan live in `patch.py` (`FANS_PER_HUB`, `LEDS_PER_FAN`); if the AIO and
+hub are on the other header, pass `--swap-headers`. `--identify` walks one LED
+at a time so you can read the physical order off the case.
 
 **Per-device tick rates are load-bearing.** DRAM and the GPU sit on SMBus/i2c at
 ~100kHz. Driving them at 60fps makes the bus the bottleneck and stutters the
 whole rig, so they're marked `slow` in `PATCH_SPEC` and get ~12fps plus a dirty
 check. Keep them as wash fixtures; put detail on the HID devices.
+
+## The duotone look
+
+`--look duotone` is the one that tries to stop looking like a visualiser. Three
+things do that work, none of which are about amplitude:
+
+- **Intrinsic movement.** The rings rotate whether or not anything is playing;
+  music modulates the rotation rather than driving brightness directly.
+  Measured: +0.302 / -0.302 / +0.302 / -0.302 turns/sec across fan_a, fan_b,
+  fan_c and the AIO.
+- **Phase relationships.** A third of a turn of spread per fan, plus
+  counter-rotation on fan_b and the AIO. Three identical rings spinning in
+  unison read as one object; opposed, they read as three. Measured: all three
+  fans peak on the same LED in only 3.6% of frames.
+- **Beats as events, not flashes.** Each onset flashes *one half* of *one* ring
+  in the accent tone while everything else keeps running, cycling round the
+  rings and alternating halves. Measured over 46 beats: hits distributed
+  11/12/12/11 across the four rings, halves alternating exactly 23/23. Every
+  fourth beat reverses the whole rig's spin direction, so a four-bar loop
+  doesn't look like one bar.
+
+Two-tone pairs are `--duo ember|toxic|vapor|cobalt|mono`, chosen so both tones
+stay distinguishable on a 6-LED ring -- adjacent hues just read as one muddy
+colour at that resolution.
+
+## Music without a usable beat
+
+Slow melodic material defeats beat detection outright. Its onset envelope has
+no periodicity to lock onto, so a beat-driven look either sits still or invents
+a pulse that isn't there -- measured, the detector fired **84 times on a ballad
+with 4 real ticks**.
+
+`--look auto` runs both behaviours and crossfades on `pulse`, so a track that
+drifts in and out of having a beat drifts between them and nothing snaps:
+
+| track | pulse settles at | behaviour |
+|---|---|---|
+| dyn (128bpm, kick+snare) | 0.67 | beat-driven |
+| hard (dense, syncopated) | 0.99 | beat-driven |
+| ballad (sustained, 4 ticks) | 0.14 | rain |
+
+**`pulse`** is the periodicity of the onset envelope -- autocorrelation over 6s
+in the 40-180 BPM lag range. Two things had to be right for this to work at all:
+the envelope must be detrended against a local moving average first (otherwise
+slow drift dominates and *every* track scores ~0.70), and the test material must
+not contain a periodic LFO, which will happily masquerade as a beat.
+
+**`swell`** is sustained loudness in dB against the song's own average, weighted
+by how much energy sits in the vocal range. It drives `rain`: drop density and
+brightness rise with it, and above a knee the gaps fill in so the pattern
+crossfades from discrete drops to a continuous glow with no mode change.
+Measured on hardware across a ballad's arc:
+
+| section | AIO LEDs lit | peak |
+|---|---|---|
+| verse | 5.4 / 18 | 113 |
+| build | 9.5 / 18 | 642 |
+| belt | 13.0 / 18 | 628 |
+| outro | 0 / 18 | 10 |
+
+**The reference must be an average, not a decaying max.** Against a max, a slow
+build tracks its own reference upward and reads 1.0 the whole way -- verse and
+chorus come out identical, which is exactly the bug that made ballads look flat.
+The same mistake in `vox_peak` made the swell run *backwards*.
 
 ## Dynamics and beats
 

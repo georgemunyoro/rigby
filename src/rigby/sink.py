@@ -30,9 +30,11 @@ MIN_LIT = 3
 
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
-                 gamma_val: float = 2.2, master: float = 1.0):
+                 gamma_val: float = 2.2, master: float = 1.0,
+                 swap_headers: bool = False):
         self.client = OpenRGBClient(host, port, "rigby")
-        self.fixtures, self.missing = resolve(self.client.devices)
+        self.fixtures, self.missing = resolve(self.client.devices,
+                                              swap_headers=swap_headers)
         self.gamma = gamma_val
         self.master = master
 
@@ -89,7 +91,7 @@ class Sink:
         lines = []
         for name, f in self.fixtures.items():
             dev = self.client.devices[f.dev_idx]
-            lines.append(f"  {name:<8} {f.n:>4} led  "
+            lines.append(f"  {name:<8} {f.n:>4} led {f.kind:<4} "
                          f"{'i2c ' + str(int(SLOW_HZ)) + 'fps' if f.slow else 'hid ' + str(int(FAST_HZ)) + 'fps'}"
                          f"   [{dev.name} / {dev.zones[f.zone_idx].name}]")
         if self.missing:
