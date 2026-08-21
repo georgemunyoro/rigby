@@ -179,6 +179,33 @@ They are measurably different motions, not reskins:
 | sparkle | +0.70 | 0.16 | 1.00 |
 | converge | 0.00 | 0.28 | 0.57 |
 
+### Saturation and legibility
+
+Flat full saturation is why animation is hard to read on a 6-LED fan. A
+saturated hue carries very little *luminance* -- pure red is about 21% of white
+-- so an arc's falloff disappears and you see one lit LED jumping rather than a
+light sweeping. Measured before: 77% of pixels above saturation 0.9.
+
+Colour now runs a **hot core**: saturation falls as intensity rises, so the
+bright head desaturates toward white and the coloured tail stays visible behind
+it. That's how a real fixture behaves, and it gives the eye a highlight to
+track.
+
+| | old (flat, full sat) | default (`--saturation 0.88 --hot 0.5`) |
+|---|---|---|
+| pixels above sat 0.9 | 77% | **11%** |
+| peak perceived luminance | 0.204 | **0.360** |
+| luminance span across a fan | 0.181 | **0.325** |
+| frame-to-frame motion signal | 0.0090 | **0.0139** |
+
+Confirmed on hardware: luminance span 0.158 -> 0.209, saturation 0.74 -> 0.60.
+
+Note the contrast *ratio* barely moves (0.803 -> 0.829) -- it's the absolute
+span that nearly doubles, which is what matters at these light levels. Arcs are
+also never allowed to span less than about 1.5 LEDs, since a 0.15-turn arc on a
+six-LED ring is a single pixel. `--saturation 1.0 --hot 0` restores the old
+flat look.
+
 ### What a beat does to colour
 
 `--hit-style swing` (default) swings the hit region to the far side of the

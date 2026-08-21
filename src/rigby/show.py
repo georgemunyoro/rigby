@@ -29,7 +29,8 @@ class Look:
     def __init__(self, fixtures: dict[str, Fixture], palette: str = "sunset",
                  gain: float = 1.6, curve: float = 0.45, duo: str = "ember",
                  hue_drift: float = 1.0, hit_style: str = "swing",
-                 swing_min_beats: int = 6):
+                 swing_min_beats: int = 6, saturation: float = 0.88,
+                 hot: float = 0.5):
         self.fixtures = fixtures
         self.palette = palette
         self.gain = gain
@@ -47,6 +48,8 @@ class Look:
         self._impacts: collections.deque[float] = collections.deque(maxlen=32)
         self._since_swing = 999
         self._swing_now = False
+        self.saturation = saturation
+        self.hot = hot
         self.t = 0.0          # global time in turns
         self.chase = 0.0      # chase phase in turns
         self._hit = 0.0       # onset flash envelope
@@ -136,7 +139,7 @@ class Look:
         # Ordinary beats keep the plain flash; only the ones that earned it
         # swing the colour over.
         if self.hit_style == "white" or not self._swing_now:
-            return rgb + fx.hsv(hacc, 0.45, mask * lum_scale)
+            return rgb + self.col(hacc, mask * lum_scale, sat=0.45)
 
         # Colour weight and brightness are separate: the hue swings all the way
         # over even in a quiet passage, and `lum_scale` decides how hard it
@@ -145,12 +148,31 @@ class Look:
         w = np.clip(mask, 0.0, 1.0)[:, None]
         lum = np.maximum(rgb.max(axis=1),
                          0.75 * np.clip(mask, 0, 1) * lum_scale)
-        swung = fx.hsv(self.hit_hue(h1, h2, hacc, beat), 1.0, lum)
+        swung = self.col(self.hit_hue(h1, h2, hacc, beat), lum)
         return rgb * (1.0 - w) + swung * w
 
+    HOT_KNEE = 0.5   # above this intensity the colour starts running hot
+
     def drive(self, x):
-        """Every look pushes its brightness through here before hsv()."""
+        """Every look pushes its brightness through here before col()."""
         return fx.drive(x, self.gain, self.curve)
+
+    def col(self, h, v, sat: float = 1.0):
+        """Colour with a hot core: saturation falls as intensity rises.
+
+        Flat full saturation is why animation is hard to read on a 6-LED fan.
+        A saturated hue carries very little luminance at the dim end, so an
+        arc's falloff disappears and all you see is one lit LED jumping from
+        place to place instead of a light sweeping round. Letting the bright
+        core desaturate towards white gives the eye a highlight to track and
+        keeps the coloured tail visible behind it -- which is how a real
+        fixture behaves.
+        """
+        v = np.atleast_1d(np.asarray(v, dtype=np.float32))
+        heat = np.clip((v - self.HOT_KNEE) / max(1.0 - self.HOT_KNEE, 1e-6),
+                       0.0, 1.0)
+        s = sat * self.saturation * (1.0 - self.hot * heat)
+        return fx.hsv(h, s, v)
 
     def render(self, f: Features) -> dict[str, np.ndarray]:
         raise NotImplementedError
@@ -256,7 +278,10 @@ class _Gesture:
     def field(self, ang, phase, t, idx, lo, hi):
         """Returns (tone0, tone1) intensity across the ring."""
         ph = phase * self.rate * self.dir + idx * self.spread
-        w = self.width
+        # On a 6-LED fan a 0.15-turn arc is barely one LED, which reads as
+        # blinking rather than sweeping. Never let an arc span less than about
+        # one and a half LEDs.
+        w = max(self.width, 1.5 / max(ang.size, 1))
 
         if self.name == "spin":
             return (fx.arc(ang, ph, w, 1.3) * (0.35 + 0.65 * lo),
@@ -325,10 +350,11 @@ class Duotone(Look):
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
                  duo="ember", hue_drift=1.0, hit_style="swing",
-                 swing_min_beats=6):
+                 swing_min_beats=6, saturation=0.88, hot=0.5):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
                          duo=duo, hue_drift=hue_drift, hit_style=hit_style,
-                         swing_min_beats=swing_min_beats)
+                         swing_min_beats=swing_min_beats,
+                         saturation=saturation, hot=hot)
         self.spin = 0.0
         self.dir = 1.0
         self.beat = 0
@@ -401,8 +427,8 @@ class Duotone(Look):
             a2 = a2 * self._xf + p2 * (1.0 - self._xf)
 
         h1, h2, hacc = self.tones()
-        rgb = (fx.hsv(h1, 1.0, self.drive(a1)) +
-               fx.hsv(h2, 0.95, self.drive(a2)))
+        rgb = (self.col(h1, self.drive(a1)) +
+               self.col(h2, self.drive(a2), sat=0.95))
 
         if self._flash > 0.01 and key == self._flash_key:
             m = fx.half(ang, self._flash_centre) * self._flash
@@ -422,8 +448,8 @@ class Duotone(Look):
         wash = fx.blur(wash, 1) if fix.n > 3 else wash
         h1, h2, hacc = self.tones()
         v = self.drive(np.clip(0.14 + wash * 0.9, 0, 1))
-        rgb = (fx.hsv(h1, 1.0, v * (1.0 - mix)) +
-               fx.hsv(h2, 0.95, v * mix))
+        rgb = (self.col(h1, v * (1.0 - mix)) +
+               self.col(h2, v * mix, sat=0.95))
         if self._flash > 0.01:
             rgb = rgb + fx.hsv(hacc, 0.5,
                                np.full(fix.n, self._flash * 0.35
@@ -541,10 +567,11 @@ class Rain(Look):
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
                  duo="ember", hue_drift=1.0, hit_style="swing",
-                 swing_min_beats=6):
+                 swing_min_beats=6, saturation=0.88, hot=0.5):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
                          duo=duo, hue_drift=hue_drift, hit_style=hit_style,
-                         swing_min_beats=swing_min_beats)
+                         swing_min_beats=swing_min_beats,
+                         saturation=saturation, hot=hot)
         self.drops = {k: _Drops(f.n, seed=i * 977 + 13, wrap=f.is_ring)
                       for i, (k, f) in enumerate(fixtures.items())}
         self._sw = 0.0
@@ -587,13 +614,13 @@ class Rain(Look):
             t0, t1, t2, hj = self.drops[key].render(width=w)
             v0 = self.drive(np.clip(t0 + ambient, 0, 1))
             v1 = self.drive(np.clip(t1 + ambient * 0.6, 0, 1))
-            rgb = (fx.hsv((h1 + hj) % 1.0, 0.95, v0) +
-                   fx.hsv((h2 + hj) % 1.0, 0.90, v1))
+            rgb = (self.col((h1 + hj) % 1.0, v0, sat=0.95) +
+                   self.col((h2 + hj) % 1.0, v1, sat=0.90))
             if t2.max() > 1e-3:
                 hh = (self.hit_hue(h1, h2, hacc, self._beats)
                       if self._swing_now else hacc)
                 sat = 1.0 if self._swing_now else 0.5
-                rgb = rgb + fx.hsv(hh, sat, self.drive(np.clip(t2, 0, 1)))
+                rgb = rgb + self.col(hh, self.drive(np.clip(t2, 0, 1)), sat=sat)
             out[key] = np.clip(rgb * f.dynamics, 0.0, 1.0)
         return out
 
@@ -610,14 +637,15 @@ class Auto(Look):
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
                  duo="ember", hue_drift=1.0, hit_style="swing",
-                 swing_min_beats=6):
+                 swing_min_beats=6, saturation=0.88, hot=0.5):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
                          duo=duo, hue_drift=hue_drift, hit_style=hit_style,
-                         swing_min_beats=swing_min_beats)
+                         swing_min_beats=swing_min_beats,
+                         saturation=saturation, hot=hot)
         self.beaty = Duotone(fixtures, palette, gain, curve, duo, hue_drift,
-                             hit_style, swing_min_beats)
+                             hit_style, swing_min_beats, saturation, hot)
         self.calm = Rain(fixtures, palette, gain, curve, duo, hue_drift,
-                         hit_style, swing_min_beats)
+                         hit_style, swing_min_beats, saturation, hot)
         self.mix = 0.0
 
     def step(self, dt: float, f: Features) -> None:
