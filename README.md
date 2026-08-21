@@ -17,10 +17,44 @@ Then:
 uv run rigby                                   # spectrum look, taps your default sink
 uv run rigby --look chase --no-audio           # rig check, no audio needed
 uv run rigby --palette cyanmag --master 0.6
-uv run rigby --source file:track.wav           # program a show against a known track
+uv run rigby --source file:track.mp3           # program a show against a known track
 ```
 
 Ctrl-C blacks out and exits.
+
+### Too dim?
+
+```sh
+uv run rigby --meter          # see the signal, drive no lights
+```
+
+If it prints `no signal ... after 3s`, nothing is reaching the tap at all --
+that's a routing or volume problem, not an effects problem.
+
+The live tap uses `parecord`, deliberately. `pw-record --target=<sink>.monitor`
+does **not** resolve PulseAudio-style monitor names -- it silently attaches to
+some unrelated source and records digital silence indefinitely, which is
+indistinguishable from broken effects. If you swap the capture command, verify
+with `--meter` that you still see signal.
+
+The meter prints input dBFS, the auto-gained level, per-band bars, and the
+resulting output brightness. If `in` sits below about -50 dBFS, the problem is
+upstream: **PipeWire sink monitors are post-volume**, so a sink turned down to
+11% hands the tap a signal ~750x smaller than you'd expect -- even though your
+Bluetooth headphones sound loud, because their volume is handled on the headset.
+Raise the sink, lower the headset.
+
+If `in` looks healthy but `out` stays low, reach for the curve:
+
+| flag | does |
+|---|---|
+| `--curve` | brightness curve, default `0.55`. Below 1 lifts the low end. `0.4` is very punchy, `1.0` is linear and looks dead. |
+| `--gain` | plain pre-curve multiplier on control signals |
+| `--master` | grand master, scales everything at the output |
+
+Why this knob has to exist: band envelopes spend most of their time around
+0.3-0.5, and output gamma then squares that away to nearly nothing. A chase
+looks bright by comparison only because its bump peaks at exactly 1.0.
 
 ### Bluetooth sinks
 
@@ -33,12 +67,35 @@ uv run rigby --offset-ms 200
 
 Tune by eye. Wired sinks want `0`.
 
+## Offline programming
+
+`--source file:PATH` decodes through ffmpeg, so mp3/flac/opus/m4a/wav all work.
+It **plays the file out loud by default** while rendering the show against it --
+one ffmpeg process with two outputs, so sound and lights cannot drift apart.
+Use `--no-play` to render silently when you're programming rather than watching.
+
+Note that the tap here is the file itself, upstream of the sink, so `--offset-ms`
+still applies if you're listening on Bluetooth.
+
+### Capture timing
+
+Capture runs on its own thread into a ring buffer; the render loop samples the
+newest window on a wall clock. This is not incidental -- PulseAudio delivers
+audio in ~340ms bursts by default, so reading one hop per rendered frame
+produces 20 instant frames then a 340ms freeze, and any backlog becomes
+permanent latency that keeps animating after the music stops. `parecord` is also
+asked for `--latency-msec=20`.
+
+Measured: 60.2 fps, frame interval p50 16.66ms / max 20.9ms, zero bursts, and
++9ms of lag beyond the raw tap. A stalled source (suspended sink, paused stream)
+fades to dark in ~800ms rather than looping on stale audio.
+
 ## Layout
 
 | module | role |
 |---|---|
 | `patch.py` | fixture definitions, resolved against live devices by name |
-| `analyze.py` | PipeWire tap -> log-spaced bands, envelopes, spectral-flux onsets |
+| `analyze.py` | audio tap -> log-spaced bands, envelopes, spectral-flux onsets |
 | `fx.py` | the desk FX primitive (waveform x rate x spread), HSV, palettes |
 | `sink.py` | OpenRGB output, per-device tick rates, dirty checks |
 | `show.py` | looks: layered wash + movement + hits |

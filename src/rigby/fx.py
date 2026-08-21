@@ -80,6 +80,18 @@ def hsv(h, s, v) -> np.ndarray:
     return np.clip(np.stack([r, g, b], axis=-1), 0.0, 1.0)
 
 
+def drive(x, gain: float = 1.0, curve: float = 0.55, floor: float = 0.0):
+    """Shape a normalised control signal into a usable brightness range.
+
+    Band envelopes spend most of their time around 0.3-0.5, and output gamma
+    then squares that away to nearly nothing -- which is why a chase (whose
+    bump peaks at exactly 1.0) looks bright while a spectrum look looks dead.
+    `curve` < 1 expands the low end back up; `gain` is a plain pre-multiplier.
+    """
+    y = (np.clip(x, 0.0, 1.0) - floor) / max(1e-6, 1.0 - floor)
+    return np.clip(np.clip(y, 0.0, 1.0) * gain, 0.0, 1.0) ** curve
+
+
 def gamma(rgb: np.ndarray, g: float = 2.2) -> np.ndarray:
     """LEDs are linear, eyes are not. Without this, low end looks blown out."""
     return np.power(np.clip(rgb, 0.0, 1.0), g)

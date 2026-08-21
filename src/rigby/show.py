@@ -19,9 +19,12 @@ class Look:
 
     name = "look"
 
-    def __init__(self, fixtures: dict[str, Fixture], palette: str = "sunset"):
+    def __init__(self, fixtures: dict[str, Fixture], palette: str = "sunset",
+                 gain: float = 1.0, curve: float = 0.55):
         self.fixtures = fixtures
         self.palette = palette
+        self.gain = gain
+        self.curve = curve
         self.t = 0.0          # global time in turns
         self.chase = 0.0      # chase phase in turns
         self._hit = 0.0       # onset flash envelope
@@ -32,6 +35,10 @@ class Look:
         self.t += dt * 0.05
         self.chase += dt * (0.25 + f.level * 1.6)
         self._hit = max(self._hit * 0.82, 1.0 if f.onset else 0.0)
+
+    def drive(self, x):
+        """Every look pushes its brightness through here before hsv()."""
+        return fx.drive(x, self.gain, self.curve)
 
     def render(self, f: Features) -> dict[str, np.ndarray]:
         raise NotImplementedError
@@ -59,6 +66,7 @@ class Spectrum(Look):
             mv = fx.wave("bump", self.chase, fix.pos, spread=1.0, size=1.0)
 
             v = fx.htp(b * 0.95, mv * 0.35 * (0.3 + f.level))
+            v = self.drive(v)
             v = np.maximum(v, self._hit * 0.9)
 
             hue = (fx.palette_hue(self.palette, self.t) + fix.pos * 0.22) % 1.0
@@ -66,7 +74,7 @@ class Spectrum(Look):
             out[key] = fx.hsv(hue, sat, v)
 
         if (fix := self.fixtures.get("mobo")) is not None:
-            v = np.full(fix.n, 0.25 + f.level * 0.7)
+            v = self.drive(np.full(fix.n, 0.18 + f.level * 0.82))
             v = np.maximum(v, self._hit)
             hue = fx.palette_hue(self.palette, self.t + 0.25)
             out["mobo"] = fx.hsv(hue, 1.0 - self._hit * 0.8, v)
@@ -76,13 +84,14 @@ class Spectrum(Look):
             if (fix := self.fixtures.get(key)) is None:
                 continue
             sweep = fx.wave("sine", self.chase * 0.5, fix.pos, spread=0.5, size=1.0)
-            v = np.clip(0.12 + f.bass * 0.85 * (0.55 + sweep * 0.45), 0, 1)
+            v = self.drive(np.clip(0.10 + f.bass * 0.90 * (0.55 + sweep * 0.45), 0, 1))
             hue = fx.palette_hue(self.palette, self.t + (0.0 if key == "ram_a" else 0.08))
             out[key] = fx.hsv(hue, 0.95, v)
 
         if (fix := self.fixtures.get("gpu")) is not None:
             hue = fx.palette_hue(self.palette, self.t + 0.5)
-            out["gpu"] = fx.hsv(hue, 0.9, np.full(1, 0.15 + f.level * 0.85))
+            out["gpu"] = fx.hsv(hue, 0.9,
+                                self.drive(np.full(1, 0.12 + f.level * 0.88)))
 
         return out
 

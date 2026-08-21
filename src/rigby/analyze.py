@@ -7,8 +7,13 @@ Two things here matter more than FFT quality:
   2. Fast-attack / slow-release envelopes. This is the whole difference between
      "cheap PC RGB" and something that reads as intentional.
 
-The audio stream is also the clock -- we read exactly one hop per frame, so the
-render loop self-clocks at `fps` with no drift.
+Capture is decoupled from rendering. A reader thread keeps a ring buffer
+current and the render loop samples the newest window on a wall clock. That
+matters because PulseAudio hands over audio in ~340ms bursts by default: reading
+one hop per rendered frame turns those bursts into visible stutter, and any
+backlog becomes permanent latency that keeps animating after the music stops.
+Offline file rendering (--no-play) keeps the sequential path, where processing
+every hop matters more than staying current.
 """
 
 from __future__ import annotations
@@ -16,8 +21,8 @@ from __future__ import annotations
 import collections
 import shutil
 import subprocess
+import threading
 import time
-import wave
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,7 +33,8 @@ RATE = 48000
 @dataclass
 class Features:
     bands: np.ndarray   # (n_bands,) normalised 0..1, envelope-shaped
-    level: float        # broadband loudness 0..1
+    level: float        # broadband loudness 0..1, auto-gained
+    rms: float          # absolute input RMS, for metering only
     bass: float         # 40-120Hz, envelope-shaped
     onset: bool         # spectral-flux transient this frame
     flux: float
@@ -46,8 +52,9 @@ def default_monitor() -> str:
 class Analyzer:
     def __init__(self, source: str | None = None, fps: int = 60, n_bands: int = 8,
                  fmin: float = 40.0, fmax: float = 16000.0, offset_ms: int = 0,
-                 window: int = 2048):
+                 window: int = 2048, play: bool = False):
         self.source = source or default_monitor()
+        self.play = play
         self.fps = fps
         self.hop = RATE // fps
         self.window = window
@@ -73,6 +80,7 @@ class Analyzer:
         self._env = np.zeros(n_bands, dtype=np.float32)
         self._bass_env = 0.0
         self._level = 0.0
+        self._level_peak = 1e-4
 
         self._prev_mag = None
         self._flux_hist: collections.deque[float] = collections.deque(maxlen=fps * 2)
@@ -85,10 +93,19 @@ class Analyzer:
         self._delay_frames = int(offset_ms / 1000 * fps)
 
         self.proc: subprocess.Popen | None = None
-        self._file: np.ndarray | None = None   # set when source is file:PATH
-        self._fpos = 0
+        self._realtime = True  # sample newest audio; False = process every hop
+        self._paced = False    # file sources decode faster than realtime
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._pumped = 0       # hops the reader thread has ingested
+        self._src_eof = False
+        self._last_pumped = 0
+        self._stale = 0        # consecutive frames with no fresh audio
         self._fclock = 0.0
         self.eof = False
+        self.error: str | None = None
+        self.frames = 0        # hops actually delivered
 
     # -- envelope coefficients (per frame) ------------------------------------
     ATTACK = 0.55   # how fast a band rises to a new peak
@@ -96,22 +113,80 @@ class Analyzer:
 
     def start(self) -> None:
         if self.source.startswith("file:"):
-            self._file = _load_wav(self.source[5:])
+            path = self.source[5:]
+            if not shutil.which("ffmpeg"):
+                raise RuntimeError("ffmpeg not found; needed to decode audio files")
+            # ffmpeg handles mp3/flac/opus/m4a/wav alike and resamples for us.
+            # Streaming it keeps a long set from being read into memory.
+            cmd = ["ffmpeg", "-v", "error", "-i", path,
+                   "-f", "f32le", "-acodec", "pcm_f32le",
+                   "-ac", "1", "-ar", str(RATE), "pipe:1"]
+            if self.play:
+                # A second output on the same decoder: one process, so sound
+                # and lights cannot drift apart. The pulse muxer runs in real
+                # time, which also paces the analysis pipe for us.
+                cmd += ["-f", "pulse", "-ac", "2", "-ar", str(RATE), "rigby"]
+
+            self.proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                bufsize=self.hop * 4 * 4)
+
+            # Playing: pulse runs the decoder in real time and we sample the
+            # newest audio. Not playing: this is offline programming, so walk
+            # the file hop by hop and analyse all of it.
+            self._realtime = self.play
+            self._paced = not self.play
             self._fclock = time.monotonic()
+            if self._realtime:
+                self._start_pump()
             return
-        if not shutil.which("pw-record"):
-            raise RuntimeError("pw-record not found (install pipewire-audio)")
-        # --container raw is essential: without it pw-record writes an AU
-        # header to stdout, and the header's length field for an open-ended
-        # stream is 0xFFFFFFFF -- which reinterpreted as float32 is NaN, which
-        # then poisons the rolling peak for the rest of the run.
+        if not shutil.which("parecord"):
+            raise RuntimeError("parecord not found (install pulseaudio-utils / "
+                               "pipewire-pulse)")
+        # parecord, NOT pw-record. `pw-record --target=<sink>.monitor` does not
+        # resolve PulseAudio-style monitor names: it silently attaches to some
+        # other source and records digital silence forever, which looks exactly
+        # like "the effects are broken". parecord resolves monitors correctly.
+        # --raw is essential too, or we'd get a WAV header parsed as samples.
         self.proc = subprocess.Popen(
-            ["pw-record", f"--target={self.source}", f"--rate={RATE}",
-             "--channels=1", "--format=f32", "--container", "raw", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ["parecord", f"--device={self.source}", f"--rate={RATE}",
+             "--channels=1", "--format=float32le", "--raw",
+             # Without this parecord delivers ~340ms bursts; 20ms keeps the
+             # reader thread fed smoothly and bounds capture latency.
+             "--latency-msec=20", "--stream-name=rigby"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=self.hop * 4 * 4)
+        self._realtime = True
+        self._fclock = time.monotonic()
+        self._start_pump()
+
+    def _start_pump(self) -> None:
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        """Reader thread: keep the ring current so no backlog can accumulate."""
+        assert self.proc and self.proc.stdout
+        nbytes = self.hop * 4
+        while not self._stop.is_set():
+            buf = self.proc.stdout.read(nbytes)
+            if not buf or len(buf) < nbytes:
+                if self.proc.stderr is not None:
+                    err = self.proc.stderr.read().decode(errors="replace").strip()
+                    if err:
+                        self.error = err.splitlines()[-1]
+                self._src_eof = True
+                return
+            c = np.frombuffer(buf, dtype=np.float32)
+            if not np.isfinite(c).all():
+                c = np.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
+            with self._lock:
+                self._ring = np.roll(self._ring, -self.hop)
+                self._ring[-self.hop:] = c
+                self._pumped += 1
 
     def stop(self) -> None:
+        self._stop.set()
         if self.proc:
             self.proc.terminate()
             try:
@@ -119,32 +194,75 @@ class Analyzer:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
             self.proc = None
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1)
+        self._thread = None
 
     def _next_chunk(self) -> np.ndarray | None:
         """One hop of mono f32, or None at end of stream."""
-        if self._file is not None:
-            if self._fpos + self.hop > self._file.size:
-                self.eof = True
-                return None
-            chunk = self._file[self._fpos:self._fpos + self.hop]
-            self._fpos += self.hop
-            # Pace to real time so the show renders at playback speed.
-            self._fclock += 1.0 / self.fps
-            lag = self._fclock - time.monotonic()
-            if lag > 0:
-                time.sleep(lag)
-            return chunk
-
         assert self.proc and self.proc.stdout
         want = self.hop * 4
         buf = self.proc.stdout.read(want)
         if not buf or len(buf) < want:
             self.eof = True
+            if self.proc.stderr is not None:
+                # Don't gate on poll() -- at first read the child often hasn't
+                # been reaped yet, which silently swallowed the real message.
+                err = self.proc.stderr.read().decode(errors="replace").strip()
+                if err:
+                    self.error = err.splitlines()[-1]
             return None
-        return np.frombuffer(buf, dtype=np.float32)
+
+        chunk = np.frombuffer(buf, dtype=np.float32)
+        self.frames += 1
+        if self._paced:
+            # A decoder runs far faster than realtime; hold it to playback speed
+            # so the show renders at the tempo it will actually be watched at.
+            self._fclock += 1.0 / self.fps
+            lag = self._fclock - time.monotonic()
+            if lag > 0:
+                time.sleep(lag)
+
+        return chunk
 
     def read(self) -> Features | None:
-        """Advance one hop, return delayed features (None while filling)."""
+        """One rendered frame's worth of features, or None if nothing yet."""
+        if self._realtime:
+            # Pace on the wall clock, not on the audio pipe. Capture bursts
+            # then no longer translate into bursts of rendered frames.
+            self._fclock += 1.0 / self.fps
+            lag = self._fclock - time.monotonic()
+            if lag > 0:
+                time.sleep(lag)
+            elif lag < -0.25:
+                self._fclock = time.monotonic()   # resync after a long stall
+
+            with self._lock:
+                pumped = self._pumped
+                ring = self._ring.copy() if pumped else None
+
+            if ring is None:
+                if self._src_eof:
+                    self.eof = True
+                return None
+            if pumped == self._last_pumped:
+                self._stale += 1
+                if self._src_eof:
+                    self.eof = True               # source ended and drained
+                    return None
+                # A few stale frames are just capture jitter -- re-analysing is
+                # harmless. A sustained stall (suspended sink, paused stream)
+                # is not: without this the show would animate on stale audio
+                # forever instead of fading out.
+                if self._stale > 3:
+                    return self._delayed(self._idle())
+            else:
+                self._stale = 0
+
+            self._last_pumped = pumped
+            self.frames += 1
+            return self._delayed(self._analyse(ring))
+
         chunk = self._next_chunk()
         if chunk is None:
             return None
@@ -153,15 +271,15 @@ class Analyzer:
             chunk = np.nan_to_num(chunk, nan=0.0, posinf=0.0, neginf=0.0)
         self._ring = np.roll(self._ring, -self.hop)
         self._ring[-self.hop:] = chunk
+        return self._delayed(self._analyse(self._ring))
 
-        mag = np.abs(np.fft.rfft(self._ring * self._han))
+    def _analyse(self, ring: np.ndarray) -> Features:
+        mag = np.abs(np.fft.rfft(ring * self._han))
 
         # Spectral flux over the low half -> kick/snare transients.
         low = mag[: len(mag) // 2]
-        if self._prev_mag is None:
-            flux = 0.0
-        else:
-            flux = float(np.sum(np.maximum(0.0, low - self._prev_mag)))
+        flux = (0.0 if self._prev_mag is None
+                else float(np.sum(np.maximum(0.0, low - self._prev_mag))))
         self._prev_mag = low
         self._flux_hist.append(flux)
 
@@ -187,36 +305,31 @@ class Analyzer:
         c = self.ATTACK if bass_n > self._bass_env else self.RELEASE
         self._bass_env += (bass_n - self._bass_env) * c
 
-        rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
-        lvl = min(1.0, rms * 8.0)
+        hop = ring[-self.hop:]
+        rms = float(np.sqrt(np.mean(hop.astype(np.float64) ** 2)))
+        # Auto-gain against a rolling reference, exactly like the bands. An
+        # absolute scale here silently collapses whenever the sink volume is
+        # low -- monitors are post-volume, so a quiet sink means a tiny tap.
+        self._level_peak = max(rms, self._level_peak * 0.9995)
+        lvl = min(1.0, rms / max(self._level_peak, 1e-9))
         self._level += (lvl - self._level) * (self.ATTACK if lvl > self._level
                                               else self.RELEASE)
 
-        f = Features(bands=self._env.copy(), level=self._level,
-                     bass=self._bass_env, onset=onset, flux=flux)
+        return Features(bands=self._env.copy(), level=self._level, rms=rms,
+                        bass=self._bass_env, onset=onset, flux=flux)
 
+    def _idle(self) -> Features:
+        """No fresh audio: release toward zero instead of holding a stale look."""
+        self._env *= (1.0 - self.RELEASE)
+        self._bass_env *= (1.0 - self.RELEASE)
+        self._level *= (1.0 - self.RELEASE)
+        self._prev_mag = None
+        return Features(bands=self._env.copy(), level=self._level, rms=0.0,
+                        bass=self._bass_env, onset=False, flux=0.0)
+
+    def _delayed(self, f: Features) -> Features | None:
+        """Hold features back by --offset-ms to match output latency."""
         if self._delay_frames <= 0:
             return f
         self._delay.append(f)
         return self._delay[0] if len(self._delay) > self._delay_frames else None
-
-
-def _load_wav(path: str) -> np.ndarray:
-    """Read a WAV to mono float32 at RATE (nearest-neighbour resample)."""
-    with wave.open(path, "rb") as w:
-        n, ch, sw, sr = (w.getnframes(), w.getnchannels(),
-                         w.getsampwidth(), w.getframerate())
-        raw = w.readframes(n)
-
-    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}.get(sw)
-    if dtype is None:
-        raise RuntimeError(f"unsupported WAV sample width: {sw} bytes")
-
-    a = np.frombuffer(raw, dtype=dtype).astype(np.float32)
-    a = (a - 128.0) / 128.0 if sw == 1 else a / float(np.iinfo(dtype).max)
-    if ch > 1:
-        a = a.reshape(-1, ch).mean(axis=1)
-    if sr != RATE:
-        idx = (np.arange(int(a.size * RATE / sr)) * sr / RATE).astype(np.int64)
-        a = a[np.clip(idx, 0, a.size - 1)]
-    return np.ascontiguousarray(a, dtype=np.float32)
