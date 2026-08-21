@@ -1,0 +1,20 @@
+[project]
+name = "rigby"
+version = "0.1.0"
+description = "Audio-reactive lighting desk for OpenRGB"
+readme = "README.md"
+authors = [
+    { name = "George Munyoro", email = "george.t@posthog.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.5.2",
+    "openrgb-python>=0.3.6",
+]
+
+[project.scripts]
+rigby = "rigby.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
