@@ -24,8 +24,8 @@ def fake_fixtures():
         pos = np.linspace(0,1,n,dtype=np.float32) if n>1 else np.array([0.5],dtype=np.float32)
         return Fixture(name,0,0,n,0,pos,slow,kind=LINE,
                        origin=ORIGINS.get(name,(0.5,0.5)))
-    return {"fan_a":ring("fan_a",6), "fan_b":ring("fan_b",6,-1.0),
-            "fan_c":ring("fan_c",6), "aio":ring("aio",18,-1.0),
+    # One fan ring, not three: the hub mirrors it to every port.
+    return {"fans":ring("fans",6), "aio":ring("aio",18,-1.0),
             "mobo":line("mobo",4), "ram_a":line("ram_a",8,slow=True),
             "ram_b":line("ram_b",8,slow=True), "gpu":line("gpu",1,slow=True)}
 

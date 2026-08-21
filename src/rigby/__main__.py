@@ -113,6 +113,11 @@ def main() -> int:
     ap.add_argument("--duo", default="ember",
                     choices=["ember", "toxic", "vapor", "cobalt", "mono"],
                     help="two-tone pair for the duotone look")
+    ap.add_argument("--fan-mode", default="mirrored",
+                    choices=["mirrored", "chained"],
+                    help="mirrored: a passive hub feeds every fan the same "
+                         "signal (one ring). chained: fans pass data through, "
+                         "so each gets its own slice")
     ap.add_argument("--swap-headers", action="store_true",
                     help="AIO and fan hub are on the other ARGB header")
     ap.add_argument("--identify", action="store_true",
@@ -171,7 +176,8 @@ def main() -> int:
 
     try:
         sink = Sink(args.host, args.port, gamma_val=args.gamma,
-                    master=args.master, swap_headers=args.swap_headers)
+                    master=args.master, swap_headers=args.swap_headers,
+                    fan_mode=args.fan_mode)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
               f"is `openrgb --server` running?\n  {e}", file=sys.stderr)

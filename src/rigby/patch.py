@@ -36,6 +36,10 @@ class Fixture:
     # A keyboard is a grid, not a 126-long strip, and drawing it as one makes
     # it unusable by hand.
     matrix: list | None = None
+    # How many times this fixture's data is repeated down the wire. A passive
+    # ARGB splitter hub feeds every port the same signal, so three fans on one
+    # header are one ring shown three times, not three rings.
+    mirror: int = 1
 
     @property
     def is_ring(self) -> bool:
@@ -53,6 +57,7 @@ LEDS_PER_FAN = 6
 # Rough positions in a unit square looking at the case from the side, so
 # effects can sweep across the whole rig rather than per-fixture.
 ORIGINS = {
+    "fans":  (0.12, 0.50),
     "fan_a": (0.12, 0.78), "fan_b": (0.12, 0.50), "fan_c": (0.12, 0.22),
     "aio":   (0.50, 0.85),
     "mobo":  (0.55, 0.50),
@@ -82,7 +87,8 @@ def _find(devices, match: str, occurrence: int = 0) -> int | None:
 
 
 def resolve(devices, swap_headers: bool = False,
-            fans: int = FANS_PER_HUB, leds_per_fan: int = LEDS_PER_FAN
+            fans: int = FANS_PER_HUB, leds_per_fan: int = LEDS_PER_FAN,
+            fan_mode: str = "mirrored"
             ) -> tuple[dict[str, Fixture], list[str]]:
     """Map the spec onto live devices. Returns (fixtures, missing_names)."""
     fixtures: dict[str, Fixture] = {}
@@ -100,8 +106,21 @@ def resolve(devices, swap_headers: bool = False,
             # openrgb-python 0.3.x has no zone.start_idx; zones are contiguous.
             return sum(len(z.leds) for z in zones[:zi])
 
-        # --- the fan hub: N rings sharing one zone -------------------------
-        if hub_zone < len(zones) and len(zones[hub_zone].leds) >= fans * leds_per_fan:
+        # --- the fan hub ---------------------------------------------------
+        if (fan_mode == "mirrored" and hub_zone < len(zones)
+                and len(zones[hub_zone].leds) >= leds_per_fan):
+            # One ring, repeated across every port by the hub. Modelling this
+            # as N independent rings means N-1 of them are computed and sent
+            # into a void, and every phase offset between fans is invisible.
+            base = zone_offset(hub_zone)
+            reps = max(1, len(zones[hub_zone].leds) // leds_per_fan)
+            fixtures["fans"] = Fixture(
+                name="fans", dev_idx=mb, zone_idx=hub_zone, n=leds_per_fan,
+                offset=base,
+                pos=np.linspace(0.0, 1.0, leds_per_fan, dtype=np.float32),
+                slow=False, kind=RING, angle=_ring_angles(leds_per_fan),
+                origin=ORIGINS["fan_b"], spin=1.0, mirror=reps)
+        elif hub_zone < len(zones) and len(zones[hub_zone].leds) >= fans * leds_per_fan:
             base = zone_offset(hub_zone)
             for i in range(fans):
                 name = f"fan_{'abc'[i]}"
@@ -117,7 +136,8 @@ def resolve(devices, swap_headers: bool = False,
                     # as three.
                     spin=-1.0 if i == 1 else 1.0)
         else:
-            missing += ["fan_a", "fan_b", "fan_c"]
+            missing += (["fans"] if fan_mode == "mirrored"
+                        else ["fan_a", "fan_b", "fan_c"])
 
         # --- the AIO pump head: one fine-grained ring ----------------------
         if aio_zone < len(zones) and len(zones[aio_zone].leds) > 0:

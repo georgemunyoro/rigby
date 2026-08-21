@@ -161,16 +161,28 @@ Anything not currently plugged in is skipped with a note at startup.
 Current patch on this machine (57 LEDs live, 183 with the USB keyboard in):
 
 ```
-fan_a     6 led ring   hid 60fps    fan hub, Aura Addressable 1
-fan_b     6 led ring   hid 60fps    fan hub   (counter-rotates)
-fan_c     6 led ring   hid 60fps    fan hub
-aio      18 led ring   hid 60fps    AIO pump head, Aura Addressable 2
+fans      6 led ring x3 hid 60fps   fan hub, Aura Addressable 1 (mirrored)
+aio      18 led ring    hid 60fps   AIO pump head, Aura Addressable 2
 mobo      4 led line   hid 60fps    Aura Mainboard
 ram_a     8 led line   i2c 12fps    ENE DRAM
 ram_b     8 led line   i2c 12fps    ENE DRAM
 gpu       1 led line   i2c 12fps    Palit RTX 3080
 kbd     126 led line   hid 60fps    EVision / Redragon Mitra (USB only)
 ```
+
+**Fans on a hub are usually one ring, not several.** A passive ARGB splitter
+feeds every port the same signal, so three fans on one header show the *same*
+six LEDs -- you cannot light one without the others. `--fan-mode mirrored`
+(default) models that honestly: a single `fans` ring whose data is repeated to
+every port. Modelling it as three independent rings means two thirds of the
+frame is computed and sent into a void, and every phase offset between fans is
+invisible.
+
+A daisy-chain hub, or fans wired in series, does give each fan its own slice --
+that's `--fan-mode chained`. To find out which you have, run
+`--fan-mode chained --identify`: it walks the LEDs one at a time across all 18.
+If the same LED lights on every fan, the hub is a splitter; if the lit LED walks
+from fan to fan, it's chained.
 
 **A fan is a ring, not a strip.** Ring fixtures carry an `angle` per LED, a
 `spin` direction and an origin in the case, which is what makes rotation,

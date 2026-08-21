@@ -31,10 +31,12 @@ MIN_LIT = 3
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
                  gamma_val: float = 2.2, master: float = 1.0,
-                 swap_headers: bool = False, raw: bool = False):
+                 swap_headers: bool = False, raw: bool = False,
+                 fan_mode: str = "mirrored"):
         self.client = OpenRGBClient(host, port, "rigby")
         self.fixtures, self.missing = resolve(self.client.devices,
-                                              swap_headers=swap_headers)
+                                              swap_headers=swap_headers,
+                                              fan_mode=fan_mode)
         self.gamma = gamma_val
         self.master = master
         # Playground mode writes what you picked. Gamma is right for shaping an
@@ -95,7 +97,8 @@ class Sink:
         lines = []
         for name, f in self.fixtures.items():
             dev = self.client.devices[f.dev_idx]
-            lines.append(f"  {name:<8} {f.n:>4} led {f.kind:<4} "
+            rep = f" x{f.mirror}" if f.mirror > 1 else "   "
+            lines.append(f"  {name:<8} {f.n:>4} led {f.kind:<4}{rep} "
                          f"{'i2c ' + str(int(SLOW_HZ)) + 'fps' if f.slow else 'hid ' + str(int(FAST_HZ)) + 'fps'}"
                          f"   [{dev.name} / {dev.zones[f.zone_idx].name}]")
         if self.missing:
@@ -118,7 +121,13 @@ class Sink:
                 rgb = frame.get(f.name)
                 if rgb is None:
                     continue
-                buf[f.offset:f.offset + f.n] = rgb[: f.n]
+                block = rgb[: f.n]
+                if f.mirror > 1:
+                    # Write every repeat, so it works whether the hub mirrors
+                    # or the chain is simply shorter than it claims.
+                    block = np.tile(block, (f.mirror, 1))
+                end = min(f.offset + len(block), len(buf))
+                buf[f.offset:end] = block[: end - f.offset]
 
             if self.raw:
                 out = np.clip(buf * self.master * 255.0 + 0.5,
