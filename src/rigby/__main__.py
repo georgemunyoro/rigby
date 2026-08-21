@@ -81,6 +81,8 @@ def main() -> int:
     ap.add_argument("--dynamics-db", type=float, default=15.0,
                     help="dB below the running reference that reads as dark; "
                          "higher = flatter, lower = more dramatic")
+    ap.add_argument("--hue-drift", type=float, default=1.0,
+                    help="speed of the slow colour drift; 0 pins the tones")
     ap.add_argument("--onset-k", type=float, default=1.7,
                     help="onset threshold in std devs; raise if it triggers "
                          "too eagerly")
@@ -113,6 +115,7 @@ def main() -> int:
     kw = {"palette": args.palette, "gain": args.gain, "curve": args.curve}
     if args.look in ("duotone", "rain", "auto"):
         kw["duo"] = args.duo
+        kw["hue_drift"] = args.hue_drift
     look = LOOKS[args.look](sink.fixtures, **kw)
 
     if args.identify:

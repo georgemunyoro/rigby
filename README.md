@@ -157,9 +157,37 @@ things do that work, none of which are about amplitude:
   fourth beat reverses the whole rig's spin direction, so a four-bar loop
   doesn't look like one bar.
 
-Two-tone pairs are `--duo ember|toxic|vapor|cobalt|mono`, chosen so both tones
-stay distinguishable on a 6-LED ring -- adjacent hues just read as one muddy
-colour at that resolution.
+### Gesture vocabulary
+
+A single behaviour plus a direction flip is still a single behaviour: it reads
+as swirling back and forth and stops being interesting after about a minute.
+Rings pick from seven gestures -- `spin`, `lobes`, `pingpong`, `breathe`,
+`wipe`, `sparkle`, `converge` -- and change on a phrase boundary
+(`PHRASE_BEATS` onsets), or on a timer when there's no beat to count. Each
+instance re-rolls its own rate, width, lobe count, direction and per-ring
+spread, and gestures crossfade over `XFADE_S` so nothing snaps.
+
+They are measurably different motions, not reskins:
+
+| gesture | rotation (turns/s) | spatial variance | duty |
+|---|---|---|---|
+| spin | +0.35 | 0.21 | 0.57 |
+| lobes | -0.90 | 0.04 | 1.00 |
+| pingpong | 0.00 | 0.24 | 0.57 |
+| breathe | +0.05 | 0.16 | 0.87 |
+| wipe | +0.03 | 0.11 | 1.00 |
+| sparkle | +0.70 | 0.16 | 1.00 |
+| converge | 0.00 | 0.28 | 0.57 |
+
+### Colour
+
+`--duo ember|toxic|vapor|cobalt|mono` sets a two-tone *relationship* -- base
+hue, separation, accent offset -- not two fixed colours. The base drifts right
+around the wheel over ~5 minutes and the separation breathes between roughly
+0.43 and 0.60 turns, so the pair keeps changing character without ever
+collapsing into one muddy colour. Storing fixed hues is why a rig ends up
+looking like the same red and blue forever. `--hue-drift 0` pins it; higher
+values speed it up.
 
 ## Music without a usable beat
 
@@ -187,6 +215,13 @@ not contain a periodic LFO, which will happily masquerade as a beat.
 by how much energy sits in the vocal range. It drives `rain`: drop density and
 brightness rise with it, and above a knee the gaps fill in so the pattern
 crossfades from discrete drops to a continuous glow with no mode change.
+
+Drops have an attack, not just a decay -- spawning at full brightness in one
+frame is a pop, not a raindrop -- and arrive on exponential inter-arrival times,
+because a fractional carry spawns at exactly even spacing and reads as a
+metronome. Blobs widen on the coarse 6-LED fan rings, where a narrow one is
+just a single LED blinking. Measured on a ballad: mean frame delta 1.47 -> 0.69
+on the AIO and 2.22 -> 0.64 on a fan, worst single-frame jump 241 -> 108.
 Measured on hardware across a ballad's arc:
 
 | section | AIO LEDs lit | peak |

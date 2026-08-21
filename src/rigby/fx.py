@@ -150,15 +150,18 @@ PALETTES = {
     "ice":     [0.55, 0.60, 0.48, 0.70],
 }
 
-# Two-tone pairs: (primary, secondary, accent-for-hits). Chosen so the two
-# tones stay distinguishable on a 6-LED ring -- adjacent hues just read as one
-# muddy colour at that resolution, so every pair is well separated on the wheel.
+# Two-tone pairs as (base hue, separation, accent offset) rather than two fixed
+# hues. Storing the *relationship* instead of the colours is what lets the base
+# drift right around the wheel while the pair stays as legible as it started --
+# fixed hues are why a rig ends up looking like the same red and blue forever.
+# Separations are kept wide: adjacent hues read as one muddy colour on a 6-LED
+# ring.
 DUOS = {
-    "ember":   (0.03, 0.58, 0.10),   # orange / blue, gold hits
-    "toxic":   (0.28, 0.80, 0.16),   # green / violet, yellow hits
-    "vapor":   (0.86, 0.52, 0.95),   # magenta / cyan, pink hits
-    "cobalt":  (0.60, 0.11, 0.50),   # blue / amber, teal hits
-    "mono":    (0.00, 0.00, 0.00),   # single hue, brightness only
+    "ember":   (0.03, 0.55, 0.07),   # warm / cool, gold accent
+    "toxic":   (0.28, 0.52, 0.88),   # green / violet, magenta accent
+    "vapor":   (0.86, 0.66, 0.09),   # magenta / cyan, warm accent
+    "cobalt":  (0.60, 0.51, 0.90),   # blue / amber, rose accent
+    "mono":    (0.00, 0.03, 0.05),   # near-single hue, brightness only
 }
 
 
