@@ -48,9 +48,11 @@ If `in` looks healthy but `out` stays low, reach for the curve:
 
 | flag | does |
 |---|---|
-| `--curve` | brightness curve, default `0.55`. Below 1 lifts the low end. `0.4` is very punchy, `1.0` is linear and looks dead. |
-| `--gain` | plain pre-curve multiplier on control signals |
+| `--curve` | brightness curve, default `0.45`. Below 1 lifts the low end. |
+| `--gain` | pre-curve multiplier, default `1.6` |
 | `--master` | grand master, scales everything at the output |
+| `--dynamics-db` | dB below the running reference that reads as dark, default `22`. Higher = flatter, lower = more dramatic. |
+| `--onset-k` | onset threshold in std devs, default `1.7`. Raise if beats trigger too eagerly. |
 
 Why this knob has to exist: band envelopes spend most of their time around
 0.3-0.5, and output gamma then squares that away to nearly nothing. A chase
@@ -122,6 +124,41 @@ kbd     126 led   hid 60fps    EVision / Redragon Mitra (USB only)
 ~100kHz. Driving them at 60fps makes the bus the bottleneck and stutters the
 whole rig, so they're marked `slow` in `PATCH_SPEC` and get ~12fps plus a dirty
 check. Keep them as wash fixtures; put detail on the HID devices.
+
+## Dynamics and beats
+
+Two things are deliberately separated:
+
+- **Band auto-gain** normalises each band against its own recent peak. That's
+  what makes the spectrum readable at any volume -- and on its own it destroys
+  dynamics, since a quiet passage gets amplified straight back up.
+- **`dynamics`** measures loudness in dB against a slow reference (~45s
+  half-life) and is applied as a master intensity. Shape and loudness stay
+  separate concerns.
+
+Onsets are peak-picked from spectral flux over **40-400 Hz only**. Measuring
+flux across half the spectrum meant sustained pads and hi-hats counted as
+transients. Detection requires a genuine local maximum (one frame of lookahead),
+a threshold of mean + `k`*std over recent flux, and a refractory gap.
+
+Scored against synthetic tracks with known beat times (`bench.py`):
+
+| | before | after |
+|---|---|---|
+| onsets fired (51 real) | 566 | 46 |
+| precision | 0.088 | **1.00** |
+| f1 | 0.162 | **0.948** |
+| loud vs quiet brightness | 1.1x | **8.2x** |
+| frame-to-frame jitter | 5.8% | **4.3%** |
+
+On a deliberately hard mix -- dense pad, 16th hats, noise floor, syncopated
+kicks -- precision 1.00 / recall 0.99.
+
+**Measure output post-gamma.** An early version of the benchmark scored
+brightness before gamma and 8-bit quantisation, which hid that quiet passages
+were going *fully black* on hardware: with gamma 2.2, any perceptual value below
+~0.11 quantises to zero. `sink.MIN_LIT` now guarantees a non-zero intent never
+lands on zero.
 
 ## Writing a look
 

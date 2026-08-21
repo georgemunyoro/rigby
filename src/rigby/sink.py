@@ -22,6 +22,11 @@ from .patch import Fixture, resolve
 FAST_HZ = 60.0
 SLOW_HZ = 12.0
 
+# With gamma 2.2 on 8-bit LEDs, every perceptual value below ~0.11 quantises to
+# zero -- so quiet passages don't dim, they switch off. Any non-zero intent gets
+# at least this raw value so the bottom of the range stays visible.
+MIN_LIT = 3
+
 
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
@@ -109,8 +114,10 @@ class Sink:
                     continue
                 buf[f.offset:f.offset + f.n] = rgb[: f.n]
 
+            lit = buf > 1e-4
             buf = gamma(buf * self.master, self.gamma)
-            out = np.clip(buf * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            raw = buf * (255.0 - MIN_LIT) + MIN_LIT
+            out = np.clip(np.where(lit, raw, 0.0) + 0.5, 0, 255).astype(np.uint8)
 
             prev = self._last.get(dev_idx)
             if prev is not None and np.array_equal(prev, out):

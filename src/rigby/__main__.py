@@ -25,7 +25,7 @@ def _meter(f, frame) -> None:
     db = 20 * np.log10(max(f.rms, 1e-9))
     bars = "".join("_.:-=+*#"[min(7, int(b * 8))] for b in f.bands)
     out_max = max((float(v.max()) for v in frame.values()), default=0.0)
-    print(f"\rin {db:7.1f} dBFS  lvl {f.level:4.2f}  bass {f.bass:4.2f}  "
+    print(f"\rin {db:7.1f} dBFS  lvl {f.level:4.2f}  dyn {f.dynamics:4.2f}  "
           f"bands [{bars}]  -> out {out_max:4.2f} "
           f"{'HIT' if f.onset else '   '}", end="", flush=True)
 
@@ -45,12 +45,18 @@ def main() -> int:
     ap.add_argument("--master", type=float, default=1.0,
                     help="grand master 0..1")
     ap.add_argument("--gamma", type=float, default=2.2)
-    ap.add_argument("--gain", type=float, default=1.0,
+    ap.add_argument("--gain", type=float, default=1.6,
                     help="pre-curve drive on control signals")
-    ap.add_argument("--curve", type=float, default=0.55,
+    ap.add_argument("--curve", type=float, default=0.45,
                     help="brightness curve; <1 lifts the low end (0.5 = punchy)")
     ap.add_argument("--play", action=argparse.BooleanOptionalAction, default=None,
                     help="play a file: source out loud (default: on for files)")
+    ap.add_argument("--dynamics-db", type=float, default=22.0,
+                    help="dB below the running reference that reads as dark; "
+                         "higher = flatter, lower = more dramatic")
+    ap.add_argument("--onset-k", type=float, default=1.7,
+                    help="onset threshold in std devs; raise if it triggers "
+                         "too eagerly")
     ap.add_argument("--meter", action="store_true",
                     help="print an input level meter instead of driving lights")
     ap.add_argument("--no-audio", action="store_true",
@@ -91,7 +97,8 @@ def main() -> int:
                       file=sys.stderr)
                 play = False
             an = Analyzer(args.source, fps=args.fps, offset_ms=args.offset_ms,
-                          play=play)
+                          play=play, dynamics_db=args.dynamics_db,
+                          onset_k=args.onset_k)
             an.start()
             print(f"listening: {an.source}"
                   + ("  (playing)" if play else "")
@@ -121,7 +128,9 @@ def main() -> int:
 
     quiet_for = 0
     warned = False
-    silent = Features(bands=np.zeros(8, dtype=np.float32), level=0.0, rms=0.0,
+    silent = Features(bands=np.zeros(8, dtype=np.float32),
+                      bands_slow=np.zeros(8, dtype=np.float32),
+                      level=0.0, dynamics=0.0, rms=0.0,
                       bass=0.0, onset=False, flux=0.0)
     dt = 1.0 / args.fps
     started = time.monotonic()

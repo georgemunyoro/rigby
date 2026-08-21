@@ -44,6 +44,21 @@ def wave(shape: str, phase: float, pos: np.ndarray, spread: float = 1.0,
     return np.clip(offset + (v - 0.5) * size + 0.5 * size, 0.0, 1.0)
 
 
+def blur(x: np.ndarray, radius: int = 2) -> np.ndarray:
+    """Box-blur along a fixture.
+
+    Neighbouring LEDs on a strip are a few millimetres apart, so per-LED
+    independence reads as noise rather than detail. Smearing slightly is most
+    of what makes a strip look like a considered wash instead of a VU meter
+    having a fit.
+    """
+    if radius <= 0 or x.size < 3:
+        return x
+    k = np.ones(2 * radius + 1, dtype=np.float32)
+    k /= k.sum()
+    return np.convolve(np.pad(x, radius, mode="edge"), k, mode="valid")
+
+
 # ------------------------------------------------------------------- merge --
 
 def htp(*layers: np.ndarray) -> np.ndarray:
@@ -80,7 +95,7 @@ def hsv(h, s, v) -> np.ndarray:
     return np.clip(np.stack([r, g, b], axis=-1), 0.0, 1.0)
 
 
-def drive(x, gain: float = 1.0, curve: float = 0.55, floor: float = 0.0):
+def drive(x, gain: float = 1.6, curve: float = 0.45, floor: float = 0.0):
     """Shape a normalised control signal into a usable brightness range.
 
     Band envelopes spend most of their time around 0.3-0.5, and output gamma

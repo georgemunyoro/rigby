@@ -32,11 +32,13 @@ RATE = 48000
 
 @dataclass
 class Features:
-    bands: np.ndarray   # (n_bands,) normalised 0..1, envelope-shaped
-    level: float        # broadband loudness 0..1, auto-gained
-    rms: float          # absolute input RMS, for metering only
-    bass: float         # 40-120Hz, envelope-shaped
-    onset: bool         # spectral-flux transient this frame
+    bands: np.ndarray       # fast envelope: transient detail
+    bands_slow: np.ndarray  # slow envelope: the sustained wash
+    level: float            # broadband loudness 0..1, auto-gained
+    dynamics: float         # loudness vs a long reference -> master intensity
+    rms: float              # absolute input RMS, for metering only
+    bass: float             # 40-120Hz, envelope-shaped
+    onset: bool             # peak-picked percussive transient
     flux: float
 
 
@@ -52,9 +54,14 @@ def default_monitor() -> str:
 class Analyzer:
     def __init__(self, source: str | None = None, fps: int = 60, n_bands: int = 8,
                  fmin: float = 40.0, fmax: float = 16000.0, offset_ms: int = 0,
-                 window: int = 2048, play: bool = False):
+                 window: int = 2048, play: bool = False,
+                 dynamics_db: float | None = None, onset_k: float | None = None):
         self.source = source or default_monitor()
         self.play = play
+        if dynamics_db is not None:
+            self.DYN_RANGE_DB = dynamics_db
+        if onset_k is not None:
+            self.ONSET_K = onset_k
         self.fps = fps
         self.hop = RATE // fps
         self.window = window
@@ -74,10 +81,20 @@ class Analyzer:
         ]
         self._bass_bin = (int(np.searchsorted(freqs, 40)),
                           int(np.searchsorted(freqs, 120)))
+        # Flux only over the percussive low band. Measuring it across half the
+        # spectrum meant sustained pads and hi-hats counted as transients, which
+        # is most of why detection fired ~11x too often.
+        self._flux_bin = (int(np.searchsorted(freqs, 40)),
+                          int(np.searchsorted(freqs, 400)))
 
         # Rolling per-band peak, so each band self-normalises.
         self._peak = np.full(n_bands, 1e-4, dtype=np.float32)
         self._env = np.zeros(n_bands, dtype=np.float32)
+        self._env_slow = np.zeros(n_bands, dtype=np.float32)
+        self._rms_slow = 0.0
+        self._loud_ref = 1e-4
+        self._dyn = 0.0
+        self._since_onset = 99.0
         self._bass_env = 0.0
         self._level = 0.0
         self._level_peak = 1e-4
@@ -108,8 +125,22 @@ class Analyzer:
         self.frames = 0        # hops actually delivered
 
     # -- envelope coefficients (per frame) ------------------------------------
-    ATTACK = 0.55   # how fast a band rises to a new peak
-    RELEASE = 0.10  # how slowly it falls back
+    ATTACK = 0.55        # fast envelope: rise to a new peak
+    RELEASE = 0.10       # fast envelope: fall back
+    SLOW_ATTACK = 0.16   # wash envelope -- deliberately lazy, this is what
+    SLOW_RELEASE = 0.05  # stops the between-beat flicker
+
+    # Auto-gain normalises every band against its own recent peak, which is
+    # what makes the spectrum readable -- and also what destroys dynamics, since
+    # a quiet passage gets amplified right back up. `dynamics` measures loudness
+    # against a long reference and is applied as a master intensity instead, so
+    # shape and loudness are separate concerns.
+    DYN_RANGE_DB = 22.0  # how far below the reference reads as fully dark
+    DYN_FLOOR = 0.10     # never quite black, so the rig doesn't look switched off
+    DYN_REF_DECAY = 0.99975   # ~45s half-life
+
+    ONSET_K = 1.7        # threshold = mean + K * std of recent flux
+    REFRACTORY_S = 0.11  # min gap between onsets (allows 16ths at 128bpm)
 
     def start(self) -> None:
         if self.source.startswith("file:"):
@@ -276,17 +307,16 @@ class Analyzer:
     def _analyse(self, ring: np.ndarray) -> Features:
         mag = np.abs(np.fft.rfft(ring * self._han))
 
-        # Spectral flux over the low half -> kick/snare transients.
-        low = mag[: len(mag) // 2]
+        # Spectral flux over the percussive low band only.
+        fa, fb = self._flux_bin
+        low = mag[fa:fb]
         flux = (0.0 if self._prev_mag is None
                 else float(np.sum(np.maximum(0.0, low - self._prev_mag))))
         self._prev_mag = low
         self._flux_hist.append(flux)
+        self._since_onset += 1.0 / self.fps
 
-        onset = False
-        if len(self._flux_hist) > self.fps // 2:
-            med = float(np.median(self._flux_hist))
-            onset = flux > med * 2.2 and flux > 1e-3
+        onset = self._pick_onset()
 
         raw = np.array([float(np.mean(mag[a:b])) for a, b in self._bins],
                        dtype=np.float32)
@@ -298,6 +328,10 @@ class Analyzer:
         rising = norm > self._env
         coef = np.where(rising, self.ATTACK, self.RELEASE).astype(np.float32)
         self._env += (norm - self._env) * coef
+
+        slow_coef = np.where(norm > self._env_slow,
+                             self.SLOW_ATTACK, self.SLOW_RELEASE).astype(np.float32)
+        self._env_slow += (norm - self._env_slow) * slow_coef
 
         a, b = self._bass_bin
         bass_raw = float(np.mean(mag[a:b])) if b > a else 0.0
@@ -315,17 +349,60 @@ class Analyzer:
         self._level += (lvl - self._level) * (self.ATTACK if lvl > self._level
                                               else self.RELEASE)
 
-        return Features(bands=self._env.copy(), level=self._level, rms=rms,
+        # Programme dynamics, in dB against a slowly-decaying reference. Uses a
+        # ~330ms smoothed loudness so a single kick can't define "loud".
+        self._rms_slow += (rms - self._rms_slow) * 0.05
+        self._loud_ref = max(self._rms_slow, self._loud_ref * self.DYN_REF_DECAY)
+        db = 20.0 * np.log10(max(self._rms_slow, 1e-9) /
+                             max(self._loud_ref, 1e-9))
+        d = float(np.clip(1.0 + db / self.DYN_RANGE_DB, 0.0, 1.0))
+        self._dyn += (d - self._dyn) * 0.08          # keep it from stepping
+        dynamics = self.DYN_FLOOR + (1.0 - self.DYN_FLOOR) * self._dyn
+
+        return Features(bands=self._env.copy(),
+                        bands_slow=self._env_slow.copy(),
+                        level=self._level, dynamics=dynamics, rms=rms,
                         bass=self._bass_env, onset=onset, flux=flux)
+
+    def _pick_onset(self) -> bool:
+        """Peak-pick the flux one frame late.
+
+        The old test -- flux above 2.2x the running median -- fired on every
+        frame of a rising transient and on sustained content too. Requiring an
+        actual local maximum, plus a refractory gap, is what separates one kick
+        from twenty consecutive 'onsets'.
+        """
+        h = self._flux_hist
+        if len(h) < 8:
+            return False
+        prev2, prev1, cur = h[-3], h[-2], h[-1]
+        if not (prev1 > prev2 and prev1 >= cur):
+            return False                       # not a local max
+        if self._since_onset < self.REFRACTORY_S:
+            return False
+        window = list(h)[:-2]                  # exclude the peak being tested
+        if len(window) < 4:
+            return False
+        mean = float(np.mean(window))
+        std = float(np.std(window))
+        if prev1 <= mean + self.ONSET_K * std or prev1 <= 1e-6:
+            return False
+        self._since_onset = 0.0
+        return True
 
     def _idle(self) -> Features:
         """No fresh audio: release toward zero instead of holding a stale look."""
         self._env *= (1.0 - self.RELEASE)
+        self._env_slow *= (1.0 - self.SLOW_RELEASE)
         self._bass_env *= (1.0 - self.RELEASE)
         self._level *= (1.0 - self.RELEASE)
+        self._dyn *= (1.0 - 0.08)
         self._prev_mag = None
-        return Features(bands=self._env.copy(), level=self._level, rms=0.0,
-                        bass=self._bass_env, onset=False, flux=0.0)
+        return Features(bands=self._env.copy(),
+                        bands_slow=self._env_slow.copy(),
+                        level=self._level,
+                        dynamics=self.DYN_FLOOR + (1.0 - self.DYN_FLOOR) * self._dyn,
+                        rms=0.0, bass=self._bass_env, onset=False, flux=0.0)
 
     def _delayed(self, f: Features) -> Features | None:
         """Hold features back by --offset-ms to match output latency."""
