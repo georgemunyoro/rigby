@@ -81,6 +81,10 @@ def main() -> int:
     ap.add_argument("--dynamics-db", type=float, default=15.0,
                     help="dB below the running reference that reads as dark; "
                          "higher = flatter, lower = more dramatic")
+    ap.add_argument("--hit-style", default="swing",
+                    choices=["swing", "accent", "white"],
+                    help="what a beat does to colour: swing to the opposite of "
+                         "the wheel, jump to the accent hue, or flash white")
     ap.add_argument("--hue-drift", type=float, default=1.0,
                     help="speed of the slow colour drift; 0 pins the tones")
     ap.add_argument("--onset-k", type=float, default=1.7,
@@ -116,6 +120,7 @@ def main() -> int:
     if args.look in ("duotone", "rain", "auto"):
         kw["duo"] = args.duo
         kw["hue_drift"] = args.hue_drift
+        kw["hit_style"] = args.hit_style
     look = LOOKS[args.look](sink.fixtures, **kw)
 
     if args.identify:

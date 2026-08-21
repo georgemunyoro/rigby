@@ -26,7 +26,7 @@ class Look:
 
     def __init__(self, fixtures: dict[str, Fixture], palette: str = "sunset",
                  gain: float = 1.6, curve: float = 0.45, duo: str = "ember",
-                 hue_drift: float = 1.0):
+                 hue_drift: float = 1.0, hit_style: str = "swing"):
         self.fixtures = fixtures
         self.palette = palette
         self.gain = gain
@@ -36,6 +36,7 @@ class Look:
         self._hue_t = 0.0
         self._sep_t = 0.0
         self._drift = hue_drift
+        self.hit_style = hit_style
         self.t = 0.0          # global time in turns
         self.chase = 0.0      # chase phase in turns
         self._hit = 0.0       # onset flash envelope
@@ -68,6 +69,44 @@ class Look:
     def _hit_scale(f: Features) -> float:
         """Flashes still land in quiet passages, just not at full power."""
         return 0.35 + 0.65 * f.dynamics
+
+    def hit_hue(self, h1: float, h2: float, hacc: float, beat: int) -> float:
+        """Hue a beat swings to: opposite the pair's midpoint.
+
+        Taking the complement of the primary looks right on paper but lands on
+        top of the secondary, because the two tones are already about half a
+        turn apart -- the "swing" then just swaps the two colours over.
+        Opposite the midpoint is the furthest point from *both*, which is a
+        genuine third colour. With the pair spanning ~0.5 turns that is ~0.25
+        from each, and no hue can do better than that.
+        """
+        if self.hit_style == "accent":
+            return hacc
+        sep = ((h2 - h1) + 1.0) % 1.0
+        mid = (h1 + sep / 2.0) % 1.0
+        # Alternate a little either side so consecutive beats aren't identical.
+        return (mid + 0.5 + (0.09 if beat % 2 else -0.09)) % 1.0
+
+    def apply_hit(self, rgb, mask, h1, h2, hacc, beat, lum_scale=1.0):
+        """Swing the masked region to the opposite of the wheel.
+
+        This *replaces* rather than adds. Adding a complementary hue on top of
+        an existing one just sums to white, which is the thing we're trying to
+        get away from -- the old accent-on-top flash trended white no matter
+        which accent hue it used.
+        """
+        if self.hit_style == "white":
+            return rgb + fx.hsv(hacc, 0.45, mask * lum_scale)
+
+        # Colour weight and brightness are separate: the hue swings all the way
+        # over even in a quiet passage, and `lum_scale` decides how hard it
+        # lands. Folding the two together only ever half-blends the hue, which
+        # lands somewhere between the two tones and reads as neither.
+        w = np.clip(mask, 0.0, 1.0)[:, None]
+        lum = np.maximum(rgb.max(axis=1),
+                         0.75 * np.clip(mask, 0, 1) * lum_scale)
+        swung = fx.hsv(self.hit_hue(h1, h2, hacc, beat), 1.0, lum)
+        return rgb * (1.0 - w) + swung * w
 
     def drive(self, x):
         """Every look pushes its brightness through here before hsv()."""
@@ -245,9 +284,9 @@ class Duotone(Look):
     name = "duotone"
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0):
+                 duo="ember", hue_drift=1.0, hit_style="swing"):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
         self.spin = 0.0
         self.dir = 1.0
         self.beat = 0
@@ -292,12 +331,13 @@ class Duotone(Look):
                 # Cycle which ring takes the hit, and alternate which half.
                 self._flash_key = self._rings[self.beat % len(self._rings)]
                 self._flash_centre = 0.0 if self.beat % 2 else 0.5
-            self._flash = 1.0
             # Structure: every fourth beat the whole rig reverses. Small change,
             # but it's what stops a loop of four bars looking like one bar.
             if self.beat % 4 == 0:
                 self.dir *= -1.0
-        self._flash = max(self._flash * 0.80, 0.0)
+        # Peak on the onset frame itself -- decaying in the same frame meant a
+        # hit never reached full strength.
+        self._flash = max(self._flash * 0.80, 1.0 if f.onset else 0.0)
 
     def _ring_rgb(self, key, fix, f) -> np.ndarray:
         ang = fix.angle
@@ -323,7 +363,8 @@ class Duotone(Look):
 
         if self._flash > 0.01 and key == self._flash_key:
             m = fx.half(ang, self._flash_centre) * self._flash
-            rgb = rgb + fx.hsv(hacc, 0.45, m * self._hit_scale(f))
+            rgb = self.apply_hit(rgb, m, h1, h2, hacc, self.beat,
+                                 lum_scale=self._hit_scale(f))
 
         return np.clip(rgb * f.dynamics, 0.0, 1.0)
 
@@ -413,8 +454,9 @@ class _Drops:
             self.tone[keep], self.hjit[keep])
 
     def render(self, width: float = 0.85):
-        """Returns (tone0, tone1, hue_offset) fields."""
+        """Returns (tone0, tone1, tone2, hue_offset) fields."""
         out = [np.zeros(self.n, dtype=np.float32),
+               np.zeros(self.n, dtype=np.float32),
                np.zeros(self.n, dtype=np.float32)]
         hue = np.zeros(self.n, dtype=np.float32)
         if self.pos.size:
@@ -423,7 +465,7 @@ class _Drops:
                 d = np.minimum(d, self.n - d)
             g = (np.exp(-(d ** 2) / (2.0 * width ** 2))
                  * (self.amp * self._env(self.age))[:, None])
-            for t in (0, 1):
+            for t in (0, 1, 2):
                 m = self.tone == t
                 if m.any():
                     out[t] = g[m].sum(axis=0).astype(np.float32)
@@ -431,7 +473,7 @@ class _Drops:
             hue = np.where(tot > 1e-6,
                            (g * self.hjit[:, None]).sum(axis=0) / np.maximum(tot, 1e-6),
                            0.0).astype(np.float32)
-        return out[0], out[1], hue
+        return out[0], out[1], out[2], hue
 
 
 class Rain(Look):
@@ -455,16 +497,19 @@ class Rain(Look):
     SWELL_EXP = 2.2
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0):
+                 duo="ember", hue_drift=1.0, hit_style="swing"):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
         self.drops = {k: _Drops(f.n, seed=i * 977 + 13, wrap=f.is_ring)
                       for i, (k, f) in enumerate(fixtures.items())}
         self._sw = 0.0
+        self._beats = 0
 
     def step(self, dt: float, f: Features) -> None:
         super().step(dt, f)
         self._sw += (f.swell - self._sw) * 0.06
+        if f.onset:
+            self._beats += 1
         s = self._eff(self._sw)
         rate = self.BASE_RATE + s * self.PEAK_RATE
         amp = 0.45 + 0.55 * s
@@ -473,7 +518,9 @@ class Rain(Look):
             r = rate * (0.45 if fixt.slow else 1.0)   # i2c fixtures stay calm
             d.step(dt, r, amp)
             if f.onset:
-                d.spawn(min(1.0, amp * 1.4), tone=2 % 2)
+                # Tone 2 is the beat drop; it renders in the swung hue rather
+                # than as another white-ish blob.
+                d.spawn(min(1.0, amp * 1.4 + 0.25), tone=2)
 
     def _eff(self, sw: float) -> float:
         """Swell shaped for density: flat until the music actually lifts."""
@@ -486,16 +533,19 @@ class Rain(Look):
         # As the swell rises the gaps fill in, so it crossfades from discrete
         # drops to a continuous glow without a mode change.
         ambient = (s ** 1.8) * 0.34
-        h1, h2, _ = self.tones()
+        h1, h2, hacc = self.tones()
         for key, fixt in self.fixtures.items():
             # Wider blobs on the coarse 6-LED fan rings, or a drop is just one
             # LED blinking on and off.
             w = 0.7 if fixt.n >= 12 else 1.05
-            t0, t1, hj = self.drops[key].render(width=w)
+            t0, t1, t2, hj = self.drops[key].render(width=w)
             v0 = self.drive(np.clip(t0 + ambient, 0, 1))
             v1 = self.drive(np.clip(t1 + ambient * 0.6, 0, 1))
             rgb = (fx.hsv((h1 + hj) % 1.0, 0.95, v0) +
                    fx.hsv((h2 + hj) % 1.0, 0.90, v1))
+            if t2.max() > 1e-3:
+                hh = self.hit_hue(h1, h2, hacc, self._beats)
+                rgb = rgb + fx.hsv(hh, 1.0, self.drive(np.clip(t2, 0, 1)))
             out[key] = np.clip(rgb * f.dynamics, 0.0, 1.0)
         return out
 
@@ -511,11 +561,13 @@ class Auto(Look):
     name = "auto"
 
     def __init__(self, fixtures, palette="sunset", gain=1.6, curve=0.45,
-                 duo="ember", hue_drift=1.0):
+                 duo="ember", hue_drift=1.0, hit_style="swing"):
         super().__init__(fixtures, palette=palette, gain=gain, curve=curve,
-                         duo=duo, hue_drift=hue_drift)
-        self.beaty = Duotone(fixtures, palette, gain, curve, duo, hue_drift)
-        self.calm = Rain(fixtures, palette, gain, curve, duo, hue_drift)
+                         duo=duo, hue_drift=hue_drift, hit_style=hit_style)
+        self.beaty = Duotone(fixtures, palette, gain, curve, duo, hue_drift,
+                             hit_style)
+        self.calm = Rain(fixtures, palette, gain, curve, duo, hue_drift,
+                         hit_style)
         self.mix = 0.0
 
     def step(self, dt: float, f: Features) -> None:

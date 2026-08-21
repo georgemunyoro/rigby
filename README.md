@@ -150,9 +150,9 @@ things do that work, none of which are about amplitude:
   counter-rotation on fan_b and the AIO. Three identical rings spinning in
   unison read as one object; opposed, they read as three. Measured: all three
   fans peak on the same LED in only 3.6% of frames.
-- **Beats as events, not flashes.** Each onset flashes *one half* of *one* ring
-  in the accent tone while everything else keeps running, cycling round the
-  rings and alternating halves. Measured over 46 beats: hits distributed
+- **Beats as colour events, not white flashes.** Each onset swings *one half*
+  of *one* ring to the opposite of the colour wheel while everything else keeps
+  running, cycling round the rings and alternating halves. Measured over 46 beats: hits distributed
   11/12/12/11 across the four rings, halves alternating exactly 23/23. Every
   fourth beat reverses the whole rig's spin direction, so a four-bar loop
   doesn't look like one bar.
@@ -178,6 +178,33 @@ They are measurably different motions, not reskins:
 | wipe | +0.03 | 0.11 | 1.00 |
 | sparkle | +0.70 | 0.16 | 1.00 |
 | converge | 0.00 | 0.28 | 0.57 |
+
+### What a beat does to colour
+
+`--hit-style swing` (default) swings the hit region to the far side of the
+wheel instead of flashing white. Two details make it work:
+
+- It **replaces** rather than adds. Adding a complementary hue on top of an
+  existing one sums to white, which is the thing being avoided -- the old
+  accent-on-top flash trended white whatever accent hue it used.
+- Colour weight and brightness are **separate**. Scaling the blend weight by
+  hit strength only ever half-blends the hue, landing between the two tones and
+  reading as neither; the hue now swings fully and `lum_scale` decides how hard
+  it lands.
+
+It swings to the point opposite the pair's *midpoint*, not the complement of
+the primary -- the complement of the primary sits on top of the secondary,
+since the two tones are already about half a turn apart, so the "swing" would
+just swap the colours over. Measured on the hit LED:
+
+| style | saturation | dist. from primary | from secondary |
+|---|---|---|---|
+| `white` | 0.44 | 0.094 | 0.416 |
+| `accent` | 1.00 | 0.070 | 0.481 |
+| `swing` | **1.00** | **0.219** | **0.219** |
+
+For a pair spanning ~0.5 turns, 0.25 is the furthest any hue can be from both,
+so 0.219 is close to the ceiling. `--hit-style white` restores the old flash.
 
 ### Colour
 
