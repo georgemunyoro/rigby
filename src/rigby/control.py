@@ -271,7 +271,7 @@ class ControlServer:
             pass
 
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>rigby</title>
 <style>
@@ -319,6 +319,7 @@ td input[type=number]{width:70px;background:#171a21;color:var(--fg);border:1px s
 .dim{color:var(--dim)}
 .frow{display:grid;grid-template-columns:88px 54px 62px 1fr 46px 78px;gap:9px;align-items:center;margin-bottom:7px;font-size:12px}
 </style>
+<div id="err" style="display:none;background:#7f1d1d;color:#fee;padding:8px 18px;font-size:12px"></div>
 <header>
   <h1>rigby</h1>
   <span class="fps" id="fps">--</span>
@@ -453,10 +454,21 @@ function buildOnce(p){
     canvasOp({op:'load',cells});
   };
   document.addEventListener('pointerup',()=>painting=false);
+  window.addEventListener('hashchange',()=>applyHash());
+  applyHash();
 }
 
-function setMode(m){
+function applyHash(){
+  const m=(location.hash||'').replace('#','');
+  if(m==='pg'||m==='playground') setMode('pg',true);
+  else if(m==='dev'||m==='devices'){ setMode('dev',true); loadDevices(); }
+  else setMode('show',true);
+  send({playground: mode==='pg'});
+}
+
+function setMode(m, skipHash){
   mode=m;
+  if(!skipHash) location.hash = m==='show' ? '' : m;
   $('view_show').style.display = m==='show'?'':'none';
   $('view_pg').style.display   = m==='pg'?'':'none';
   $('view_dev').style.display  = m==='dev'?'':'none';
@@ -588,6 +600,12 @@ function paint(){
   $('bo').className=params.blackout?'on':'';
 }
 function bar(id,v){ $('b_'+id).style.width=Math.max(0,Math.min(1,v))*100+'%'; $('v_'+id).textContent=v.toFixed(2); }
+function fail(e){
+  const b=$('err');
+  b.textContent='ui error: '+(e && e.message ? e.message : e);
+  b.style.display='';
+  console.error(e);
+}
 async function tick(){
   try{
     const r=await fetch('/state'); const d=await r.json();
@@ -603,7 +621,8 @@ async function tick(){
     if(t.onset) { $('hit').style.opacity=1; setTimeout(()=>$('hit').style.opacity=0,110); }
     if(!geo){ const g=await (await fetch('/patch')).json(); geo=g; buildRig(); }
     paintRig(t.frame);
-  }catch(e){}
+    $('err').style.display='none';
+  }catch(e){ fail(e); }
 }
 setInterval(tick,100); tick();
 </script>

@@ -151,6 +151,21 @@ Measured: 60.2 fps, frame interval p50 16.66ms / max 20.9ms, zero bursts, and
 +9ms of lag beyond the raw tap. A stalled source (suspended sink, paused stream)
 fades to dark in ~800ms rather than looping on stale audio.
 
+### Checking the UI
+
+```sh
+uv run python check_ui.py
+```
+
+The page is a Python string, so a stray escape becomes a real newline at import
+and kills the entire script. The page still renders and the tabs still exist --
+they just do nothing, with no error anywhere. This parses the served JS with
+`node --check` and refuses unbalanced quotes. `PAGE` is a raw string for the
+same reason: every escape in it belongs to JavaScript, not Python.
+
+The tabs are hash-routed (`#playground`, `#devices`), so they deep-link and can
+be driven headlessly for testing.
+
 ## Benchmarks
 
 `bench.py` scores onset accuracy, dynamics and smoothness against synthetic
