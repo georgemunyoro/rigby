@@ -6,12 +6,15 @@ import argparse
 import signal
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
 from .analyze import Analyzer, Features, default_monitor
+from .config import RigConfig, apply_zone_sizes, default_path
 from .control import (REBUILD, Canvas, ControlServer, Params,
                        Telemetry, geometry_of)
+from .devices import Devices
 from .show import LOOKS
 from .sink import Sink
 
@@ -118,6 +121,8 @@ def main() -> int:
                     help="mirrored: a passive hub feeds every fan the same "
                          "signal (one ring). chained: fans pass data through, "
                          "so each gets its own slice")
+    ap.add_argument("--config", default=None,
+                    help=f"rig config file (default {default_path()})")
     ap.add_argument("--fans", type=int, default=3,
                     help="fans daisy-chained on the hub header")
     ap.add_argument("--leds-per-fan", type=int, default=6,
@@ -187,11 +192,26 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=6742)
     args = ap.parse_args()
 
+    cfg_path = Path(args.config) if args.config else default_path()
+    cfg = RigConfig.load(cfg_path)
+    # Explicit flags win over the saved file, so a one-off run can still
+    # override calibration without editing it.
+    given = {a.split("=")[0].lstrip("-").replace("-", "_") for a in sys.argv[1:]}
+    if "fan_mode" not in given:
+        args.fan_mode = cfg.fan_mode
+    if "fans" not in given:
+        args.fans = cfg.fans
+    if "leds_per_fan" not in given:
+        args.leds_per_fan = cfg.leds_per_fan
+    if "swap_headers" not in given:
+        args.swap_headers = cfg.swap_headers
+
     try:
         sink = Sink(args.host, args.port, gamma_val=args.gamma,
                     master=args.master, swap_headers=args.swap_headers,
                     fan_mode=args.fan_mode, fans=args.fans,
-                    leds_per_fan=args.leds_per_fan)
+                    leds_per_fan=args.leds_per_fan,
+                    overrides=cfg.fixtures)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
               f"is `openrgb --server` running?\n  {e}", file=sys.stderr)
@@ -200,6 +220,11 @@ def main() -> int:
     if not sink.fixtures:
         print("no fixtures resolved -- check `openrgb --list-devices`", file=sys.stderr)
         return 1
+
+    for note in apply_zone_sizes(sink.client, cfg.zones):
+        print(f"  zone: {note}")
+    if cfg.zones:
+        sink.rebuild()
 
     sink.set_direct()
     print(f"patch ({sum(f.n for f in sink.fixtures.values())} leds live):")
@@ -265,11 +290,12 @@ def main() -> int:
     telem = Telemetry()
     geometry = geometry_of(sink.fixtures)
     canvas = Canvas(geometry)
+    devices = Devices(sink, cfg, cfg_path)
     control = None
     if args.control:
         try:
             control = ControlServer(params, telem, sink.describe(),
-                                    geometry, canvas,
+                                    geometry, canvas, devices,
                                     host=args.control_host, port=args.control)
             control.start()
             where = ("localhost" if args.control_host in ("127.0.0.1", "localhost")
@@ -334,6 +360,19 @@ def main() -> int:
                           f"--meter", file=sys.stderr, flush=True)
                     warned = True
 
+            if devices.take_rebuild():
+                sink.rebuild(fan_mode=cfg.fan_mode, fans=cfg.fans,
+                             leds_per_fan=cfg.leds_per_fan,
+                             swap_headers=cfg.swap_headers,
+                             overrides=cfg.fixtures)
+                geometry = geometry_of(sink.fixtures)
+                canvas = Canvas(geometry)
+                if control is not None:
+                    control.set_geometry(geometry, canvas)
+                look = build_look()
+                print(f"\npatch rebuilt: "
+                      f"{sum(f.n for f in sink.fixtures.values())} leds", flush=True)
+
             # Live knobs: applied between frames, so nothing has to restart.
             dirty = params.take_dirty()
             if dirty:
@@ -358,6 +397,17 @@ def main() -> int:
                 frame = look.render(f)
             if params.blackout:
                 frame = {k: v * 0.0 for k, v in frame.items()}
+
+            hl = devices.active_highlight()
+            if hl is not None:
+                name, led = hl
+                # Identify overrides everything: dark rig, one thing lit.
+                frame = {k: v * 0.05 for k, v in frame.items()}
+                if name in frame and frame[name].size:
+                    if led is None:
+                        frame[name][:] = 1.0
+                    elif 0 <= led < frame[name].shape[0]:
+                        frame[name][led] = (1.0, 1.0, 1.0)
 
             if args.meter:
                 _meter(f, frame)

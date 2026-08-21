@@ -167,7 +167,7 @@ class Telemetry:
 
 
 def _handler(params: Params, telem: Telemetry, patch_text: str,
-             geometry: dict, canvas: Canvas):
+             geometry: dict, canvas: Canvas, devices):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -188,6 +188,9 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
                                    "telemetry": telem.get(),
                                    "patch": patch_text}).encode()
                 return self._send(200, body, "application/json")
+            if self.path.startswith("/devices"):
+                return self._send(200, json.dumps(devices.state()).encode(),
+                                  "application/json")
             if self.path.startswith("/patch"):
                 return self._send(200, json.dumps(geometry).encode(),
                                   "application/json")
@@ -199,6 +202,15 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
+            if self.path.startswith("/devices"):
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                try:
+                    msg = json.loads(self.rfile.read(n) or b"{}")
+                except json.JSONDecodeError:
+                    return self._send(400, b"bad json", "text/plain")
+                out = devices.command(msg if isinstance(msg, dict) else {})
+                return self._send(200, json.dumps(out).encode(),
+                                  "application/json")
             if self.path.startswith("/canvas"):
                 n = int(self.headers.get("Content-Length", 0) or 0)
                 try:
@@ -230,14 +242,23 @@ class ControlServer:
     """
 
     def __init__(self, params: Params, telem: Telemetry, patch_text: str,
-                 geometry: dict, canvas: Canvas,
+                 geometry: dict, canvas: Canvas, devices,
                  host: str = "127.0.0.1", port: int = 8721):
         self.params, self.telem, self.canvas = params, telem, canvas
+        self._patch_text, self._devices = patch_text, devices
         self.httpd = ThreadingHTTPServer(
-            (host, port), _handler(params, telem, patch_text, geometry, canvas))
+            (host, port),
+            _handler(params, telem, patch_text, geometry, canvas, devices))
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self._t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def set_geometry(self, geometry: dict, canvas: Canvas) -> None:
+        """Swap in a new patch after a rebuild, without dropping the server."""
+        self.canvas = canvas
+        self.httpd.RequestHandlerClass = _handler(
+            self.params, self.telem, self._patch_text, geometry, canvas,
+            self._devices)
 
     def start(self) -> None:
         self._t.start()
@@ -291,6 +312,12 @@ pre{color:var(--dim);font-size:11px;white-space:pre-wrap;margin:0}
 .cell.gap{border:0;background:none;cursor:default}
 .cell:hover{border-color:var(--acc)}
 .grid{display:grid;gap:3px}
+table{border-collapse:collapse;font-size:12px}
+td,th{padding:4px 10px 4px 0;text-align:left;color:var(--fg)}
+th{color:var(--dim);font-weight:400;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+td input[type=number]{width:70px;background:#171a21;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit;font-size:12px}
+.dim{color:var(--dim)}
+.frow{display:grid;grid-template-columns:88px 54px 62px 1fr 46px 78px;gap:9px;align-items:center;margin-bottom:7px;font-size:12px}
 </style>
 <header>
   <h1>rigby</h1>
@@ -301,6 +328,7 @@ pre{color:var(--dim);font-size:11px;white-space:pre-wrap;margin:0}
   <span style="flex:1"></span>
   <button id="tab_show" class="on">show</button>
   <button id="tab_pg">playground</button>
+  <button id="tab_dev">devices</button>
 </header>
 <main id="view_show">
 <section>
@@ -323,6 +351,29 @@ pre{color:var(--dim);font-size:11px;white-space:pre-wrap;margin:0}
   <pre id="patch"></pre>
 </section>
 </main>
+
+<div id="view_dev" style="display:none">
+  <section style="border-right:0">
+    <h2>chain</h2>
+    <div class="tools">
+      <label class="sw">fan mode</label><select id="d_fan_mode"><option>mirrored</option><option>chained</option></select>
+      <label class="sw">fans</label><input type="number" id="d_fans" min="1" max="64" style="width:66px">
+      <label class="sw">leds/fan</label><input type="number" id="d_lpf" min="1" max="64" style="width:66px">
+      <label class="sw"><input type="checkbox" id="d_swap"> swap headers</label>
+      <button id="d_apply">apply</button>
+      <button id="d_save">save config</button>
+    </div>
+
+    <h2>zones &mdash; set a header to its real chain length</h2>
+    <table id="d_zones"></table>
+
+    <h2 style="margin-top:20px">fixtures &mdash; calibrate each ring</h2>
+    <div id="d_fixtures"></div>
+
+    <h2 style="margin-top:20px">log</h2>
+    <pre id="d_notes"></pre>
+  </section>
+</div>
 
 <div id="view_pg" style="display:none">
   <section style="border-right:0">
@@ -385,6 +436,11 @@ function buildOnce(p){
 
   $('tab_show').onclick=()=>setMode('show');
   $('tab_pg').onclick=()=>setMode('pg');
+  $('tab_dev').onclick=()=>{setMode('dev');loadDevices();};
+  $('d_apply').onclick=()=>devCmd({op:'chain',fan_mode:$('d_fan_mode').value,
+      fans:+$('d_fans').value,leds_per_fan:+$('d_lpf').value,
+      swap_headers:$('d_swap').checked});
+  $('d_save').onclick=()=>devCmd({op:'save'});
   $('pbright').oninput=()=>$('pbrightv').textContent=(+$('pbright').value).toFixed(2);
   $('t_paint').onclick=()=>{tool='paint';$('t_paint').className='on';$('t_erase').className='';};
   $('t_erase').onclick=()=>{tool='erase';$('t_erase').className='on';$('t_paint').className='';};
@@ -403,11 +459,62 @@ function setMode(m){
   mode=m;
   $('view_show').style.display = m==='show'?'':'none';
   $('view_pg').style.display   = m==='pg'?'':'none';
+  $('view_dev').style.display  = m==='dev'?'':'none';
   $('tab_show').className = m==='show'?'on':'';
   $('tab_pg').className   = m==='pg'?'on':'';
+  $('tab_dev').className  = m==='dev'?'on':'';
   send({playground: m==='pg'});
   $('pgnote').textContent = m==='pg'
     ? 'show paused \u00b7 colours are written exactly, no gamma' : '';
+}
+
+async function devCmd(o){
+  try{
+    const r=await fetch('/devices',{method:'POST',body:JSON.stringify(o)});
+    renderDevices(await r.json());
+    geo=null;                      // patch may have changed; redraw playground
+  }catch(e){}
+}
+async function loadDevices(){
+  try{ renderDevices(await (await fetch('/devices')).json()); }catch(e){}
+}
+function renderDevices(d){
+  const c=d.config;
+  if(document.activeElement.id!=='d_fans')  $('d_fans').value=c.fans;
+  if(document.activeElement.id!=='d_lpf')   $('d_lpf').value=c.leds_per_fan;
+  $('d_fan_mode').value=c.fan_mode; $('d_swap').checked=c.swap_headers;
+
+  let h='<tr><th>device</th><th>zone</th><th>leds</th><th></th><th></th></tr>';
+  d.zones.forEach((z,i)=>{
+    h+=`<tr><td class="dim">${z.device}</td><td>${z.zone}</td>
+      <td><input type="number" min="0" max="512" value="${z.leds}" id="z_${i}"
+        ${z.resizable?'':'disabled'}></td>
+      <td>${z.resizable?`<button data-z="${i}" data-k="${z.key}">set</button>`:'<span class="dim">fixed</span>'}</td>
+      <td class="dim">${z.patched?'in patch':''}</td></tr>`;
+  });
+  $('d_zones').innerHTML=h;
+  $('d_zones').querySelectorAll('button').forEach(b=>b.onclick=()=>
+    devCmd({op:'resize',key:b.dataset.k,leds:+$('z_'+b.dataset.z).value}));
+
+  let f='';
+  for(const [name,x] of Object.entries(d.fixtures)){
+    f+=`<div class="frow">
+      <span>${name}</span>
+      <span class="dim">${x.n}${x.mirror>1?'x'+x.mirror:''}</span>
+      <button data-sp="${name}" data-v="${x.spin>=0?-1:1}">${x.spin>=0?'cw':'ccw'}</button>
+      <input type="range" min="0" max="0.99" step="0.01" value="${x.rotate}" data-rot="${name}">
+      <span class="val">${(+x.rotate).toFixed(2)}</span>
+      <button data-id="${name}">identify</button></div>`;
+  }
+  $('d_fixtures').innerHTML=f;
+  $('d_fixtures').querySelectorAll('[data-sp]').forEach(b=>b.onclick=()=>
+    devCmd({op:'calibrate',fixture:b.dataset.sp,spin:+b.dataset.v}));
+  $('d_fixtures').querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>
+    devCmd({op:'identify',fixture:b.dataset.id,seconds:3}));
+  $('d_fixtures').querySelectorAll('[data-rot]').forEach(r=>r.onchange=()=>
+    devCmd({op:'calibrate',fixture:r.dataset.rot,rotate:+r.value}));
+
+  $('d_notes').textContent=(d.notes||[]).join('\n')+'\n\n'+(d.patch||'');
 }
 
 function buildRig(){

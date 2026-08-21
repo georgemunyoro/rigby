@@ -33,12 +33,13 @@ class Sink:
                  gamma_val: float = 2.2, master: float = 1.0,
                  swap_headers: bool = False, raw: bool = False,
                  fan_mode: str = "mirrored", fans: int = 3,
-                 leds_per_fan: int = 6):
+                 leds_per_fan: int = 6, overrides: dict | None = None):
         self.client = OpenRGBClient(host, port, "rigby")
+        self._patch_kw = dict(swap_headers=swap_headers, fan_mode=fan_mode,
+                              fans=fans, leds_per_fan=leds_per_fan,
+                              overrides=overrides or {})
         self.fixtures, self.missing = resolve(self.client.devices,
-                                              swap_headers=swap_headers,
-                                              fan_mode=fan_mode, fans=fans,
-                                              leds_per_fan=leds_per_fan)
+                                              **self._patch_kw)
         self.gamma = gamma_val
         self.master = master
         # Playground mode writes what you picked. Gamma is right for shaping an
@@ -76,6 +77,19 @@ class Sink:
                 lo, hi = min(lo, hi), max(lo, hi)
                 cur = (lo + hi) // 2 if mode.speed is None else mode.speed
                 mode.speed = max(lo, min(hi, cur))
+
+    def rebuild(self, **kw) -> None:
+        """Re-resolve the patch after the rig or its calibration changed."""
+        self._patch_kw.update(kw)
+        self.client.update()
+        self.fixtures, self.missing = resolve(self.client.devices,
+                                              **self._patch_kw)
+        self._dev_fixtures = {}
+        for f in self.fixtures.values():
+            self._dev_fixtures.setdefault(f.dev_idx, []).append(f)
+        self._last.clear()
+        self._next.clear()
+        self.set_direct()
 
     def set_direct(self) -> None:
         """Direct mode = host drives every frame. Without it the device keeps

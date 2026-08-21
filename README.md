@@ -38,6 +38,27 @@ flashes), because most tuning questions are really "is the analysis right or is
 the mapping wrong", and reading that off a number beats inferring it from the
 lights.
 
+### Devices
+
+The **devices** tab is where the rig gets calibrated, and it writes to
+`~/.config/rigby/config.json` so it survives restarts -- calibration is
+something you settle once by eye, not a flag you retype.
+
+- **zones** -- set a header to its real chain length. Resizes the OpenRGB zone
+  live and re-resolves the patch, since a zone that grew shifts every offset
+  after it.
+- **chain** -- fan mode, fan count, LEDs per fan, swap headers. Applied by
+  rebuilding the patch between frames.
+- **fixtures** -- per ring: spin direction, and a rotate offset that moves where
+  LED 0 sits. Fans mounted mirrored run backwards and each fan's first LED lands
+  at whatever clock position its own wiring puts it; neither is knowable in
+  advance, so both are dialled in by eye.
+- **identify** -- dims the whole rig and lights one fixture, so you can tell
+  which physical fan is `fan_c`.
+
+CLI flags still win over the saved file, so a one-off run can override
+calibration without editing it.
+
 ### Playground
 
 The **playground** tab draws the rig as it physically is -- rings as rings, the

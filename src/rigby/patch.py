@@ -99,11 +99,12 @@ def _find(devices, match: str, occurrence: int = 0) -> int | None:
 
 def resolve(devices, swap_headers: bool = False,
             fans: int = FANS_PER_HUB, leds_per_fan: int = LEDS_PER_FAN,
-            fan_mode: str = "mirrored"
+            fan_mode: str = "mirrored", overrides: dict | None = None
             ) -> tuple[dict[str, Fixture], list[str]]:
     """Map the spec onto live devices. Returns (fixtures, missing_names)."""
     fixtures: dict[str, Fixture] = {}
     missing: list[str] = []
+    overrides = overrides or {}
 
     hub_zone, aio_zone = (AIO_ZONE, HUB_ZONE) if swap_headers else (HUB_ZONE, AIO_ZONE)
 
@@ -188,5 +189,18 @@ def resolve(devices, swap_headers: bool = False,
                  else np.array([0.5], dtype=np.float32)),
             slow=slow, kind=LINE, origin=ORIGINS.get(name, (0.5, 0.5)),
             matrix=matrix)
+
+    # Calibration: which way a ring turns, and where its first LED sits.
+    # Fans mounted mirrored run backwards, and LED 0 lands at whatever clock
+    # position the fan's own wiring puts it -- neither is knowable in advance.
+    for name, fx in fixtures.items():
+        o = overrides.get(name) or {}
+        if "spin" in o:
+            fx.spin = 1.0 if float(o["spin"]) >= 0 else -1.0
+        if o.get("rotate") and fx.angle is not None:
+            fx.angle = (fx.angle + float(o["rotate"])) % 1.0
+        if o.get("reverse") and fx.angle is not None:
+            fx.angle = (-fx.angle) % 1.0
+            fx.reverse = True
 
     return fixtures, missing
