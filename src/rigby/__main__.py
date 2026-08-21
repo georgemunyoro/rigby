@@ -10,7 +10,8 @@ import time
 import numpy as np
 
 from .analyze import Analyzer, Features, default_monitor
-from .control import REBUILD, ControlServer, Params, Telemetry
+from .control import (REBUILD, Canvas, ControlServer, Params,
+                       Telemetry, geometry_of)
 from .show import LOOKS
 from .sink import Sink
 
@@ -29,6 +30,19 @@ def _meter(f, frame) -> None:
     print(f"\rin {db:7.1f} dBFS  dyn {f.dynamics:4.2f}  swell {f.swell:4.2f}  "
           f"pulse {f.pulse:4.2f}  bands [{bars}]  -> out {out_max:4.2f} "
           f"{'HIT' if f.onset else '   '}", end="", flush=True)
+
+
+def _frame_hex(frame) -> dict:
+    """The frame as hex per fixture, so the UI can mirror the real rig."""
+    out = {}
+    for name, arr in frame.items():
+        a = np.clip(np.asarray(arr, dtype=np.float32), 0.0, 1.0)
+        if a.ndim != 2 or a.shape[0] == 0:
+            out[name] = []
+            continue
+        v = (a * 255.0 + 0.5).astype(np.uint8)
+        out[name] = ["#%02x%02x%02x" % tuple(int(c) for c in px) for px in v]
+    return out
 
 
 def _apply_live(look, an, sink, params, dirty) -> None:
@@ -224,10 +238,13 @@ def main() -> int:
             an = None
 
     telem = Telemetry()
+    geometry = geometry_of(sink.fixtures)
+    canvas = Canvas(geometry)
     control = None
     if args.control:
         try:
             control = ControlServer(params, telem, sink.describe(),
+                                    geometry, canvas,
                                     host=args.control_host, port=args.control)
             control.start()
             where = ("localhost" if args.control_host in ("127.0.0.1", "localhost")
@@ -301,7 +318,19 @@ def main() -> int:
                     _apply_live(look, an, sink, params, dirty)
 
             look.step(dt, f)
-            frame = look.render(f)
+            if sink.raw != params.playground:
+                sink.raw = params.playground
+                sink._last.clear()          # curve changed; force a redraw
+            if params.playground:
+                # Hand control to the canvas entirely -- the look still steps,
+                # so switching back resumes mid-gesture rather than restarting.
+                cells = canvas.snapshot()
+                frame = {k: np.asarray(cells.get(k, []), dtype=np.float32)
+                         .reshape(-1, 3)[:fx.n]
+                         for k, fx in sink.fixtures.items()}
+                look.render(f)
+            else:
+                frame = look.render(f)
             if params.blackout:
                 frame = {k: v * 0.0 for k, v in frame.items()}
 
@@ -314,7 +343,8 @@ def main() -> int:
                 frames += 1
                 now = time.monotonic()
                 if now - last_report >= 0.2:
-                    telem.set(fps=frames / max(now - last_report, 1e-6),
+                    telem.set(frame=_frame_hex(frame),
+                              fps=frames / max(now - last_report, 1e-6),
                               dbfs=(20 * np.log10(max(f.rms, 1e-9))),
                               level=f.level, dynamics=f.dynamics,
                               swell=f.swell, pulse=f.pulse, onset=bool(f.onset),

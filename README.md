@@ -38,6 +38,23 @@ flashes), because most tuning questions are really "is the analysis right or is
 the mapping wrong", and reading that off a number beats inferring it from the
 lights.
 
+### Playground
+
+The **playground** tab draws the rig as it physically is -- rings as rings, the
+keyboard as its real 6x23 matrix (read from the device's own `matrix_map`, gaps
+included), strips as strips -- and lets you paint individual LEDs by clicking or
+dragging. Pick a colour, set a brightness, or switch to erase; `fill` works per
+fixture or across everything, and `capture from show` loads whatever the show is
+currently displaying so you can start from it.
+
+Painted colours are written **exactly**: playground mode bypasses gamma and the
+`MIN_LIT` floor, because those shape an effect's brightness and only get in the
+way when you're hand-setting a colour. Picking `#803C30` puts `(128, 60, 48)` on
+the LED. The show keeps stepping while paused, so switching back resumes
+mid-gesture.
+
+Both tabs mirror the live rig, so the show view doubles as a monitor.
+
 Changing `look` or `duo` rebuilds the look; everything else is written straight
 onto the live objects. `--control-host 0.0.0.0` lets a phone on the same network
 reach it -- there is no authentication, so anyone who can reach the port can
@@ -112,6 +129,18 @@ asked for `--latency-msec=20`.
 Measured: 60.2 fps, frame interval p50 16.66ms / max 20.9ms, zero bursts, and
 +9ms of lag beyond the raw tap. A stalled source (suspended sink, paused stream)
 fades to dark in ~800ms rather than looping on stale audio.
+
+## Benchmarks
+
+`bench.py` scores onset accuracy, dynamics and smoothness against synthetic
+tracks with known beat times. The tracks aren't in git -- regenerate them:
+
+```sh
+uv run python tracks.py /tmp/rigby-tracks
+uv run python bench.py /tmp/rigby-tracks/dyn.wav /tmp/rigby-tracks/dyn.json
+```
+
+Every seed is fixed, so the numbers reproduce exactly.
 
 ## Layout
 

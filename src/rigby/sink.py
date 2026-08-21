@@ -31,12 +31,16 @@ MIN_LIT = 3
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
                  gamma_val: float = 2.2, master: float = 1.0,
-                 swap_headers: bool = False):
+                 swap_headers: bool = False, raw: bool = False):
         self.client = OpenRGBClient(host, port, "rigby")
         self.fixtures, self.missing = resolve(self.client.devices,
                                               swap_headers=swap_headers)
         self.gamma = gamma_val
         self.master = master
+        # Playground mode writes what you picked. Gamma is right for shaping an
+        # effect's brightness, but when hand-setting a colour it just means the
+        # LED doesn't match the swatch.
+        self.raw = raw
 
         # dev_idx -> next allowed write time / last frame written
         self._next: dict[int, float] = {}
@@ -116,10 +120,15 @@ class Sink:
                     continue
                 buf[f.offset:f.offset + f.n] = rgb[: f.n]
 
-            lit = buf > 1e-4
-            buf = gamma(buf * self.master, self.gamma)
-            raw = buf * (255.0 - MIN_LIT) + MIN_LIT
-            out = np.clip(np.where(lit, raw, 0.0) + 0.5, 0, 255).astype(np.uint8)
+            if self.raw:
+                out = np.clip(buf * self.master * 255.0 + 0.5,
+                              0, 255).astype(np.uint8)
+            else:
+                lit = buf > 1e-4
+                buf = gamma(buf * self.master, self.gamma)
+                scaled = buf * (255.0 - MIN_LIT) + MIN_LIT
+                out = np.clip(np.where(lit, scaled, 0.0) + 0.5,
+                              0, 255).astype(np.uint8)
 
             prev = self._last.get(dev_idx)
             if prev is not None and np.array_equal(prev, out):

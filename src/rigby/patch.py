@@ -32,6 +32,10 @@ class Fixture:
     origin: tuple[float, float] = (0.5, 0.5)   # rough place in the case
     spin: float = 1.0     # +1 / -1, so neighbouring rings can counter-rotate
     reverse: bool = False
+    # Rows of LED indices with None for gaps, when the device reports one.
+    # A keyboard is a grid, not a 126-long strip, and drawing it as one makes
+    # it unusable by hand.
+    matrix: list | None = None
 
     @property
     def is_ring(self) -> bool:
@@ -137,11 +141,18 @@ def resolve(devices, swap_headers: bool = False,
         if n == 0:
             missing.append(name)
             continue
+        mm = getattr(zones[zone_idx], "matrix_map", None)
+        matrix = ([[(None if v is None or v >= n else int(v)) for v in row]
+                   for row in mm]
+                  if mm and all(isinstance(r, (list, tuple)) for r in mm)
+                  else None)
+
         fixtures[name] = Fixture(
             name=name, dev_idx=dev_idx, zone_idx=zone_idx, n=n,
             offset=sum(len(z.leds) for z in zones[:zone_idx]),
             pos=(np.linspace(0.0, 1.0, n, dtype=np.float32) if n > 1
                  else np.array([0.5], dtype=np.float32)),
-            slow=slow, kind=LINE, origin=ORIGINS.get(name, (0.5, 0.5)))
+            slow=slow, kind=LINE, origin=ORIGINS.get(name, (0.5, 0.5)),
+            matrix=matrix)
 
     return fixtures, missing
