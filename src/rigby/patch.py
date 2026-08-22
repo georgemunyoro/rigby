@@ -3,19 +3,26 @@
 Effects address *fixtures* -- named groups that know their own shape -- never
 raw device or LED indices. A fan is not a strip: it is a ring, and it has an
 angle, a spin direction and a centre. Effects that know that can rotate, split
-a ring in half, or offset one fan against the next; effects that only see a
-flat list of LEDs can do none of those things and end up looking like a VU
-meter no matter how good the analysis is.
+a ring in half, or offset one fan against the next.
+
+Nothing here hardcodes a device name. Every zone OpenRGB reports becomes a
+fixture, and the config says how to carve the interesting ones up -- an
+Adalight strip carrying seven fans is seven rings, and no amount of guessing
+from a device name would work out that it is anything but a strip.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 
 import numpy as np
 
 LINE = "line"
 RING = "ring"
+
+# i2c/SMBus devices must be rate-limited; everything else takes 60fps.
+SLOW_TYPES = {"DRAM", "GPU", "MOTHERBOARD_SLOW"}
 
 
 @dataclass
@@ -29,170 +36,136 @@ class Fixture:
     slow: bool            # i2c/SMBus -- must be rate-limited
     kind: str = LINE
     angle: np.ndarray | None = None   # (n,) 0..1 turns around a ring
-    origin: tuple[float, float] = (0.5, 0.5)   # rough place in the case
+    origin: tuple[float, float] = (0.5, 0.5)
     spin: float = 1.0     # +1 / -1, so neighbouring rings can counter-rotate
     reverse: bool = False
-    # Rows of LED indices with None for gaps, when the device reports one.
-    # A keyboard is a grid, not a 126-long strip, and drawing it as one makes
-    # it unusable by hand.
     matrix: list | None = None
-    # How many times this fixture's data is repeated down the wire. A passive
-    # ARGB splitter hub feeds every port the same signal, so three fans on one
-    # header are one ring shown three times, not three rings.
-    mirror: int = 1
+    mirror: int = 1       # data repeated down the wire by a splitter hub
 
     @property
     def is_ring(self) -> bool:
         return self.kind == RING
 
 
-# Which ARGB header carries what. `--swap-headers` flips these when the cables
-# are the other way round; `--identify` walks the LEDs so you can check.
-HUB_ZONE = 1   # 3 fans x 6 on a hub
-AIO_ZONE = 2   # AIO pump head, one 18-LED ring
-
-FANS_PER_HUB = 3
-LEDS_PER_FAN = 6
-
-# Rough positions in a unit square looking at the case from the side, so
-# effects can sweep across the whole rig rather than per-fixture.
-ORIGINS = {
-    "fans":  (0.12, 0.50),
-    "aio":   (0.50, 0.85),
-    "mobo":  (0.55, 0.50),
-    "ram_a": (0.62, 0.72), "ram_b": (0.68, 0.72),
-    "gpu":   (0.55, 0.30),
-    "kbd":   (0.50, 0.05),
-}
-
-# (fixture, device-name substring, zone, occurrence, slow)
-LINE_SPEC: list[tuple[str, str, int, int, bool]] = [
-    ("mobo",  "ASUS TUF", 0, 0, False),
-    ("ram_a", "ENE DRAM", 0, 0, True),
-    ("ram_b", "ENE DRAM", 0, 1, True),
-    ("gpu",   "GeForce",  0, 0, True),
-    ("kbd",   "EVision",  0, 0, False),
+# Friendly names for zones worth recognising. Everything else is named from
+# the device and zone it came from, which is always at least unambiguous.
+KNOWN = [
+    (r"aura mainboard", "mobo"),
+    (r"gpu", "gpu"),
+    (r"dram", "ram"),
+    (r"keyboard", "kbd"),
 ]
 
+ORIGINS = {
+    "mobo": (0.55, 0.50), "gpu": (0.55, 0.30),
+    "ram_a": (0.62, 0.72), "ram_b": (0.68, 0.72),
+    "kbd": (0.50, 0.05), "aio": (0.50, 0.85),
+}
 
-def _ring_angles(n: int) -> np.ndarray:
-    """0..1 turns around the ring, one step per LED."""
-    return (np.arange(n, dtype=np.float32) / max(n, 1))
+
+def slug(s: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+    return s or "zone"
 
 
-def fan_name(i: int) -> str:
-    """fan_a .. fan_z, then fan_27 onward. Ten fans is not unusual."""
-    return f"fan_{chr(ord('a') + i)}" if i < 26 else f"fan_{i + 1}"
+def zone_key(dev, zone_idx: int) -> str:
+    return f"{dev.name}:{zone_idx}"
+
+
+def ring_angles(n: int) -> np.ndarray:
+    return np.arange(n, dtype=np.float32) / max(n, 1)
+
+
+def _base_name(dev, zone, zone_idx: int, used: set) -> str:
+    hay = f"{dev.name} {zone.name}".lower()
+    for pat, name in KNOWN:
+        if re.search(pat, hay):
+            if name == "ram":                     # two sticks, same name
+                for suffix in "abcdefgh":
+                    cand = f"ram_{suffix}"
+                    if cand not in used:
+                        return cand
+            return name
+    base = slug(zone.name if zone.name.lower() not in ("led strip", "virtual zone")
+                else dev.name)
+    cand, i = base, 2
+    while cand in used:
+        cand, i = f"{base}_{i}", i + 1
+    return cand
 
 
 def _fan_origin(i: int, total: int) -> tuple[float, float]:
-    """Stack the chain down the left of the case, first fan at the top."""
     if total <= 1:
         return (0.12, 0.5)
     return (0.12, 0.90 - 0.80 * (i / (total - 1)))
 
 
-def _find(devices, match: str, occurrence: int = 0) -> int | None:
-    hits = [i for i, d in enumerate(devices) if match.lower() in d.name.lower()]
-    return hits[occurrence] if occurrence < len(hits) else None
+def resolve(devices, groups: dict | None = None, overrides: dict | None = None,
+            **_legacy) -> tuple[dict[str, Fixture], list[str]]:
+    """Turn every zone OpenRGB reports into fixtures.
 
-
-def resolve(devices, swap_headers: bool = False,
-            fans: int = FANS_PER_HUB, leds_per_fan: int = LEDS_PER_FAN,
-            fan_mode: str = "mirrored", overrides: dict | None = None
-            ) -> tuple[dict[str, Fixture], list[str]]:
-    """Map the spec onto live devices. Returns (fixtures, missing_names)."""
-    fixtures: dict[str, Fixture] = {}
-    missing: list[str] = []
+    `groups` carves a zone into rings: {"<device>:<zone>": {"rings": 7,
+    "leds_per_ring": 11, "name": "cfan", "mirror": 1, "skip": false}}.
+    """
+    groups = groups or {}
     overrides = overrides or {}
+    fixtures: dict[str, Fixture] = {}
+    notes: list[str] = []
 
-    hub_zone, aio_zone = (AIO_ZONE, HUB_ZONE) if swap_headers else (HUB_ZONE, AIO_ZONE)
-
-    mb = _find(devices, "ASUS TUF")
-    if mb is None:
-        missing += ["fan_a", "fan_b", "fan_c", "aio"]
-    else:
-        zones = devices[mb].zones
-
-        def zone_offset(zi: int) -> int:
-            # openrgb-python 0.3.x has no zone.start_idx; zones are contiguous.
-            return sum(len(z.leds) for z in zones[:zi])
-
-        # --- the fan hub ---------------------------------------------------
-        if (fan_mode == "mirrored" and hub_zone < len(zones)
-                and len(zones[hub_zone].leds) >= leds_per_fan):
-            # One ring, repeated across every port by the hub. Modelling this
-            # as N independent rings means N-1 of them are computed and sent
-            # into a void, and every phase offset between fans is invisible.
-            base = zone_offset(hub_zone)
-            reps = max(1, len(zones[hub_zone].leds) // leds_per_fan)
-            fixtures["fans"] = Fixture(
-                name="fans", dev_idx=mb, zone_idx=hub_zone, n=leds_per_fan,
-                offset=base,
-                pos=np.linspace(0.0, 1.0, leds_per_fan, dtype=np.float32),
-                slow=False, kind=RING, angle=_ring_angles(leds_per_fan),
-                origin=ORIGINS["fans"], spin=1.0, mirror=reps)
-        elif hub_zone < len(zones) and len(zones[hub_zone].leds) >= fans * leds_per_fan:
-            base = zone_offset(hub_zone)
-            # However many actually fit on the chain, not however many were
-            # asked for -- a wrong count silently addresses LEDs that aren't
-            # there.
-            room = len(zones[hub_zone].leds) // leds_per_fan
-            count = max(1, min(fans, room))
-            for i in range(count):
-                name = fan_name(i)
-                fixtures[name] = Fixture(
-                    name=name, dev_idx=mb, zone_idx=hub_zone, n=leds_per_fan,
-                    offset=base + i * leds_per_fan,
-                    pos=np.linspace(0.0, 1.0, leds_per_fan, dtype=np.float32),
-                    slow=False, kind=RING, angle=_ring_angles(leds_per_fan),
-                    origin=_fan_origin(i, count),
-                    # Alternate spin down the chain: identical rings turning in
-                    # unison read as one object, opposed they read as many.
-                    spin=-1.0 if i % 2 else 1.0)
-        else:
-            missing += (["fans"] if fan_mode == "mirrored"
-                        else [fan_name(i) for i in range(fans)])
-
-        # --- the AIO pump head: one fine-grained ring ----------------------
-        if aio_zone < len(zones) and len(zones[aio_zone].leds) > 0:
-            n = len(zones[aio_zone].leds)
-            fixtures["aio"] = Fixture(
-                name="aio", dev_idx=mb, zone_idx=aio_zone, n=n,
-                offset=zone_offset(aio_zone),
-                pos=np.linspace(0.0, 1.0, n, dtype=np.float32),
-                slow=False, kind=RING, angle=_ring_angles(n),
-                origin=ORIGINS["aio"], spin=-1.0)
-        else:
-            missing.append("aio")
-
-    for name, match, zone_idx, occurrence, slow in LINE_SPEC:
-        dev_idx = _find(devices, match, occurrence)
-        if dev_idx is None or zone_idx >= len(devices[dev_idx].zones):
-            missing.append(name)
+    for di, dev in enumerate(devices):
+        if dev.type.name == "VIRTUAL":
+            # Virtual devices are remaps of LEDs we already drive; writing to
+            # both would fight over the same hardware.
             continue
-        zones = devices[dev_idx].zones
-        n = len(zones[zone_idx].leds)
-        if n == 0:
-            missing.append(name)
-            continue
-        mm = getattr(zones[zone_idx], "matrix_map", None)
-        matrix = ([[(None if v is None or v >= n else int(v)) for v in row]
-                   for row in mm]
-                  if mm and all(isinstance(r, (list, tuple)) for r in mm)
-                  else None)
+        slow = dev.type.name in SLOW_TYPES
+        for zi, zone in enumerate(dev.zones):
+            n = len(zone.leds)
+            if n == 0:
+                continue
+            offset = sum(len(z.leds) for z in dev.zones[:zi])
+            spec = groups.get(zone_key(dev, zi)) or {}
+            if spec.get("skip"):
+                continue
 
-        fixtures[name] = Fixture(
-            name=name, dev_idx=dev_idx, zone_idx=zone_idx, n=n,
-            offset=sum(len(z.leds) for z in zones[:zone_idx]),
-            pos=(np.linspace(0.0, 1.0, n, dtype=np.float32) if n > 1
-                 else np.array([0.5], dtype=np.float32)),
-            slow=slow, kind=LINE, origin=ORIGINS.get(name, (0.5, 0.5)),
-            matrix=matrix)
+            rings = int(spec.get("rings", 0) or 0)
+            per = int(spec.get("leds_per_ring", 0) or 0)
+            mirror = max(1, int(spec.get("mirror", 1) or 1))
+
+            if rings > 0 and per > 0:
+                base = spec.get("name") or _base_name(dev, zone, zi, set(fixtures))
+                fit = n // (per * mirror)
+                count = max(1, min(rings, fit)) if fit else 1
+                if count < rings:
+                    notes.append(f"{zone_key(dev, zi)}: only room for {count} "
+                                 f"x {per} (zone has {n})")
+                for k in range(count):
+                    name = f"{base}_{chr(ord('a') + k)}" if count > 1 else base
+                    fixtures[name] = Fixture(
+                        name=name, dev_idx=di, zone_idx=zi, n=per,
+                        offset=offset + k * per * mirror,
+                        pos=np.linspace(0.0, 1.0, per, dtype=np.float32),
+                        slow=slow, kind=RING, angle=ring_angles(per),
+                        origin=_fan_origin(k, count),
+                        spin=-1.0 if k % 2 else 1.0, mirror=mirror)
+                continue
+
+            name = spec.get("name") or _base_name(dev, zone, zi, set(fixtures))
+            kind = spec.get("kind") or (RING if spec.get("ring") else LINE)
+            mm = getattr(zone, "matrix_map", None)
+            matrix = ([[(None if v is None or v >= n else int(v)) for v in row]
+                       for row in mm]
+                      if mm and all(isinstance(r, (list, tuple)) for r in mm)
+                      else None)
+            fixtures[name] = Fixture(
+                name=name, dev_idx=di, zone_idx=zi, n=n, offset=offset,
+                pos=(np.linspace(0.0, 1.0, n, dtype=np.float32) if n > 1
+                     else np.array([0.5], dtype=np.float32)),
+                slow=slow, kind=kind,
+                angle=ring_angles(n) if kind == RING else None,
+                origin=ORIGINS.get(name, (0.5, 0.5)), matrix=matrix,
+                mirror=mirror)
 
     # Calibration: which way a ring turns, and where its first LED sits.
-    # Fans mounted mirrored run backwards, and LED 0 lands at whatever clock
-    # position the fan's own wiring puts it -- neither is knowable in advance.
     for name, fx in fixtures.items():
         o = overrides.get(name) or {}
         if "spin" in o:
@@ -203,4 +176,4 @@ def resolve(devices, swap_headers: bool = False,
             fx.angle = (-fx.angle) % 1.0
             fx.reverse = True
 
-    return fixtures, missing
+    return fixtures, notes

@@ -315,9 +315,10 @@ pre{color:var(--dim);font-size:11px;white-space:pre-wrap;margin:0}
 table{border-collapse:collapse;font-size:12px}
 td,th{padding:4px 10px 4px 0;text-align:left;color:var(--fg)}
 th{color:var(--dim);font-weight:400;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
-td input[type=number]{width:70px;background:#171a21;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit;font-size:12px}
+td input[type=number],td input[type=text]{background:#171a21;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit;font-size:12px}
 .dim{color:var(--dim)}
-.frow{display:grid;grid-template-columns:88px 54px 62px 1fr 46px 78px;gap:9px;align-items:center;margin-bottom:7px;font-size:12px}
+button.sp{padding:1px 6px;font-size:10px;margin-right:3px}
+.frow{display:grid;grid-template-columns:130px 54px 62px 1fr 46px 78px;gap:9px;align-items:center;margin-bottom:7px;font-size:12px}
 </style>
 <div id="err" style="display:none;background:#7f1d1d;color:#fee;padding:8px 18px;font-size:12px"></div>
 <header>
@@ -355,17 +356,10 @@ td input[type=number]{width:70px;background:#171a21;color:var(--fg);border:1px s
 
 <div id="view_dev" style="display:none">
   <section style="border-right:0">
-    <h2>chain</h2>
-    <div class="tools">
-      <label class="sw">fan mode</label><select id="d_fan_mode"><option>mirrored</option><option>chained</option></select>
-      <label class="sw">fans</label><input type="number" id="d_fans" min="1" max="64" style="width:66px">
-      <label class="sw">leds/fan</label><input type="number" id="d_lpf" min="1" max="64" style="width:66px">
-      <label class="sw"><input type="checkbox" id="d_swap"> swap headers</label>
-      <button id="d_apply">apply</button>
-      <button id="d_save">save config</button>
-    </div>
+    <div class="tools"><button id="d_save">save config</button>
+      <span class="fps">changes apply live; save to keep them</span></div>
 
-    <h2>zones &mdash; set a header to its real chain length</h2>
+    <h2>zones &mdash; length, and how to carve them into fixtures</h2>
     <table id="d_zones"></table>
 
     <h2 style="margin-top:20px">fixtures &mdash; calibrate each ring</h2>
@@ -438,9 +432,6 @@ function buildOnce(p){
   $('tab_show').onclick=()=>setMode('show');
   $('tab_pg').onclick=()=>setMode('pg');
   $('tab_dev').onclick=()=>{setMode('dev');loadDevices();};
-  $('d_apply').onclick=()=>devCmd({op:'chain',fan_mode:$('d_fan_mode').value,
-      fans:+$('d_fans').value,leds_per_fan:+$('d_lpf').value,
-      swap_headers:$('d_swap').checked});
   $('d_save').onclick=()=>devCmd({op:'save'});
   $('pbright').oninput=()=>$('pbrightv').textContent=(+$('pbright').value).toFixed(2);
   $('t_paint').onclick=()=>{tool='paint';$('t_paint').className='on';$('t_erase').className='';};
@@ -491,22 +482,37 @@ async function loadDevices(){
   try{ renderDevices(await (await fetch('/devices')).json()); }catch(e){}
 }
 function renderDevices(d){
-  const c=d.config;
-  if(document.activeElement.id!=='d_fans')  $('d_fans').value=c.fans;
-  if(document.activeElement.id!=='d_lpf')   $('d_lpf').value=c.leds_per_fan;
-  $('d_fan_mode').value=c.fan_mode; $('d_swap').checked=c.swap_headers;
-
-  let h='<tr><th>device</th><th>zone</th><th>leds</th><th></th><th></th></tr>';
+  let h='<tr><th>device</th><th>zone</th><th>leds</th><th></th>'
+       +'<th>carve into</th><th>name</th><th></th></tr>';
   d.zones.forEach((z,i)=>{
-    h+=`<tr><td class="dim">${z.device}</td><td>${z.zone}</td>
-      <td><input type="number" min="0" max="512" value="${z.leds}" id="z_${i}"
-        ${z.resizable?'':'disabled'}></td>
+    const g=z.group||{};
+    const splits=(z.splits||[]).map(([k,per])=>
+      `<button class="sp" data-k="${z.key}" data-r="${k}" data-p="${per}">${k}x${per}</button>`).join(' ');
+    h+=`<tr>
+      <td class="dim">${z.device}${z.virtual?' <span class="dim">(virtual, skipped)</span>':''}</td>
+      <td>${z.zone}</td>
+      <td><input type="number" min="0" max="512" value="${z.leds}" id="z_${i}" ${z.resizable?'':'disabled'}></td>
       <td>${z.resizable?`<button data-z="${i}" data-k="${z.key}">set</button>`:'<span class="dim">fixed</span>'}</td>
+      <td>
+        <input type="number" min="0" max="64" placeholder="rings" value="${g.rings||''}" id="gr_${i}" style="width:56px">
+        <span class="dim">x</span>
+        <input type="number" min="0" max="256" placeholder="each" value="${g.leds_per_ring||''}" id="gp_${i}" style="width:56px">
+        <button data-g="${i}" data-k="${z.key}">apply</button>
+        <div class="dim" style="margin-top:4px">${splits||'&nbsp;'}</div>
+      </td>
+      <td><input type="text" value="${g.name||''}" placeholder="auto" id="gn_${i}" style="width:88px"></td>
       <td class="dim">${z.patched?'in patch':''}</td></tr>`;
   });
   $('d_zones').innerHTML=h;
-  $('d_zones').querySelectorAll('button').forEach(b=>b.onclick=()=>
+  $('d_zones').querySelectorAll('[data-z]').forEach(b=>b.onclick=()=>
     devCmd({op:'resize',key:b.dataset.k,leds:+$('z_'+b.dataset.z).value}));
+  $('d_zones').querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>{
+    const i=b.dataset.g;
+    devCmd({op:'group',key:b.dataset.k,rings:+$('gr_'+i).value||0,
+            leds_per_ring:+$('gp_'+i).value||0,name:$('gn_'+i).value});
+  });
+  $('d_zones').querySelectorAll('.sp').forEach(b=>b.onclick=()=>
+    devCmd({op:'group',key:b.dataset.k,rings:+b.dataset.r,leds_per_ring:+b.dataset.p}));
 
   let f='';
   for(const [name,x] of Object.entries(d.fixtures)){

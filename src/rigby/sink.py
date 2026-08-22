@@ -31,13 +31,10 @@ MIN_LIT = 3
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
                  gamma_val: float = 2.2, master: float = 1.0,
-                 swap_headers: bool = False, raw: bool = False,
-                 fan_mode: str = "mirrored", fans: int = 3,
-                 leds_per_fan: int = 6, overrides: dict | None = None):
+                 raw: bool = False,
+                 groups: dict | None = None, overrides: dict | None = None):
         self.client = OpenRGBClient(host, port, "rigby")
-        self._patch_kw = dict(swap_headers=swap_headers, fan_mode=fan_mode,
-                              fans=fans, leds_per_fan=leds_per_fan,
-                              overrides=overrides or {})
+        self._patch_kw = dict(groups=groups or {}, overrides=overrides or {})
         self.fixtures, self.missing = resolve(self.client.devices,
                                               **self._patch_kw)
         self.gamma = gamma_val
@@ -114,7 +111,7 @@ class Sink:
         for name, f in self.fixtures.items():
             dev = self.client.devices[f.dev_idx]
             rep = f" x{f.mirror}" if f.mirror > 1 else "   "
-            lines.append(f"  {name:<8} {f.n:>4} led {f.kind:<4}{rep} "
+            lines.append(f"  {name:<20} {f.n:>4} led {f.kind:<4}{rep} "
                          f"{'i2c ' + str(int(SLOW_HZ)) + 'fps' if f.slow else 'hid ' + str(int(FAST_HZ)) + 'fps'}"
                          f"   [{dev.name} / {dev.zones[f.zone_idx].name}]")
         if self.missing:

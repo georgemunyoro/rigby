@@ -12,6 +12,7 @@ import threading
 import time
 
 from .config import RigConfig, apply_zone_sizes
+from .patch import zone_key
 
 MAX_ZONE = 512      # the driver clamps well below this; just a sanity bound
 
@@ -35,12 +36,20 @@ class Devices:
             zones = []
             for di, dev in enumerate(self.sink.client.devices):
                 for zi, z in enumerate(dev.zones):
+                    n = len(z.leds)
+                    key = zone_key(dev, zi)
                     zones.append({
-                        "key": f"{dev.name}:{zi}",
+                        "key": key,
                         "device": dev.name,
                         "zone": z.name,
-                        "leds": len(z.leds),
+                        "leds": n,
                         "resizable": z.type.name != "SINGLE",
+                        "virtual": dev.type.name == "VIRTUAL",
+                        "group": self.cfg.groups.get(key) or {},
+                        # Ways this zone divides evenly, so a fan count can be
+                        # picked off a list instead of worked out by hand.
+                        "splits": [[k, n // k] for k in range(2, 33)
+                                   if n % k == 0 and n // k >= 3],
                         "patched": any(f.dev_idx == di and f.zone_idx == zi
                                        for f in self.sink.fixtures.values()),
                     })
@@ -66,6 +75,8 @@ class Devices:
                 self._resize(msg)
             elif op == "chain":
                 self._chain(msg)
+            elif op == "group":
+                self._group(msg)
             elif op == "calibrate":
                 self._calibrate(msg)
             elif op == "identify":
@@ -108,6 +119,28 @@ class Devices:
                     pass
         self.cfg.fans = max(1, self.cfg.fans)
         self.cfg.leds_per_fan = max(1, self.cfg.leds_per_fan)
+        self.rebuild_requested = True
+
+    def _group(self, msg: dict) -> None:
+        key = msg.get("key")
+        if not key:
+            return
+        spec = dict(self.cfg.groups.get(key) or {})
+        for field, cast in (("rings", int), ("leds_per_ring", int),
+                            ("mirror", int), ("name", str), ("kind", str),
+                            ("skip", bool)):
+            if field in msg:
+                try:
+                    spec[field] = cast(msg[field])
+                except (TypeError, ValueError):
+                    pass
+        if not spec.get("rings"):
+            spec.pop("rings", None)
+            spec.pop("leds_per_ring", None)
+        if spec:
+            self.cfg.groups[key] = spec
+        else:
+            self.cfg.groups.pop(key, None)
         self.rebuild_requested = True
 
     def _calibrate(self, msg: dict) -> None:

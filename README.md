@@ -197,14 +197,25 @@ Anything not currently plugged in is skipped with a note at startup.
 Current patch on this machine (57 LEDs live, 183 with the USB keyboard in):
 
 ```
-fans      6 led ring x3 hid 60fps   fan hub, Aura Addressable 1 (mirrored)
-aio      18 led ring    hid 60fps   AIO pump head, Aura Addressable 2
+cfan_a..g 11 led ring    hid 60fps   7 chassis fans, Adalight (Arduino)
+afan_a..c 18 led ring    hid 60fps   3 AIO fans, Aura Addressable 1
+aio       12 led ring    hid 60fps   AIO block, Aura Addressable 2
 mobo      4 led line   hid 60fps    Aura Mainboard
 ram_a     8 led line   i2c 12fps    ENE DRAM
 ram_b     8 led line   i2c 12fps    ENE DRAM
 gpu       1 led line   i2c 12fps    Palit RTX 3080
 kbd     126 led line   hid 60fps    EVision / Redragon Mitra (USB only)
 ```
+
+**Nothing is hardcoded to a device name.** Every zone OpenRGB reports becomes a
+fixture, and the config says how to carve the interesting ones up. An Adalight
+strip carrying seven fans is seven rings; no amount of guessing from a device
+name would work out that it is anything but a strip. Set it in the devices tab,
+which lists each zone's even divisions so a fan count can be picked rather than
+worked out -- 77 LEDs offers `7x11`, 54 offers `3x18`.
+
+Virtual devices are skipped: they remap LEDs that are already driven, and
+writing to both would fight over the same hardware.
 
 **Fans on a hub are usually one ring, not several.** A passive ARGB splitter
 feeds every port the same signal, so three fans on one header show the *same*

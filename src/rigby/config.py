@@ -29,6 +29,9 @@ class RigConfig:
     zones: dict = field(default_factory=dict)
     # fixture name -> {"spin": 1|-1, "rotate": 0..1}
     fixtures: dict = field(default_factory=dict)
+    # "<device>:<zone>" -> how to carve that zone into fixtures, e.g.
+    # {"rings": 7, "leds_per_ring": 11, "name": "cfan"}
+    groups: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "RigConfig":
@@ -41,7 +44,7 @@ class RigConfig:
             return cls()
         cfg = cls()
         for k in ("fan_mode", "fans", "leds_per_fan", "swap_headers",
-                  "zones", "fixtures"):
+                  "zones", "fixtures", "groups"):
             if k in raw:
                 setattr(cfg, k, raw[k])
         return cfg
@@ -57,6 +60,7 @@ class RigConfig:
             "swap_headers": bool(self.swap_headers),
             "zones": self.zones,
             "fixtures": self.fixtures,
+            "groups": self.groups,
         }, indent=2) + "\n")
         tmp.replace(path)              # atomic, so a crash can't truncate it
         return path
@@ -65,7 +69,8 @@ class RigConfig:
         return {"fan_mode": self.fan_mode, "fans": self.fans,
                 "leds_per_fan": self.leds_per_fan,
                 "swap_headers": self.swap_headers,
-                "zones": dict(self.zones), "fixtures": dict(self.fixtures)}
+                "zones": dict(self.zones), "fixtures": dict(self.fixtures),
+                "groups": dict(self.groups)}
 
 
 def apply_zone_sizes(client, zones: dict) -> list[str]:

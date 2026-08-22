@@ -116,19 +116,8 @@ def main() -> int:
     ap.add_argument("--duo", default="ember",
                     choices=["ember", "toxic", "vapor", "cobalt", "mono"],
                     help="two-tone pair for the duotone look")
-    ap.add_argument("--fan-mode", default="mirrored",
-                    choices=["mirrored", "chained"],
-                    help="mirrored: a passive hub feeds every fan the same "
-                         "signal (one ring). chained: fans pass data through, "
-                         "so each gets its own slice")
     ap.add_argument("--config", default=None,
                     help=f"rig config file (default {default_path()})")
-    ap.add_argument("--fans", type=int, default=3,
-                    help="fans daisy-chained on the hub header")
-    ap.add_argument("--leds-per-fan", type=int, default=6,
-                    help="LEDs in each fan's ring")
-    ap.add_argument("--swap-headers", action="store_true",
-                    help="AIO and fan hub are on the other ARGB header")
     ap.add_argument("--probe", metavar="ZONE",
                     help="discover a header's real layout, e.g. --probe 1 "
                          "(motherboard zone index, or 'Device name:zone')")
@@ -197,20 +186,9 @@ def main() -> int:
     # Explicit flags win over the saved file, so a one-off run can still
     # override calibration without editing it.
     given = {a.split("=")[0].lstrip("-").replace("-", "_") for a in sys.argv[1:]}
-    if "fan_mode" not in given:
-        args.fan_mode = cfg.fan_mode
-    if "fans" not in given:
-        args.fans = cfg.fans
-    if "leds_per_fan" not in given:
-        args.leds_per_fan = cfg.leds_per_fan
-    if "swap_headers" not in given:
-        args.swap_headers = cfg.swap_headers
-
     try:
         sink = Sink(args.host, args.port, gamma_val=args.gamma,
-                    master=args.master, swap_headers=args.swap_headers,
-                    fan_mode=args.fan_mode, fans=args.fans,
-                    leds_per_fan=args.leds_per_fan,
+                    master=args.master, groups=cfg.groups,
                     overrides=cfg.fixtures)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
@@ -324,10 +302,13 @@ def main() -> int:
     warned = False
     frames = 0
     last_report = time.monotonic()
+    # --no-audio is for checking the rig and calibrating it, so it has to be
+    # visible. dynamics=0 multiplies every look that respects it down to black,
+    # which reads as "the device isn't working".
     silent = Features(bands=np.zeros(8, dtype=np.float32),
-                      bands_slow=np.zeros(8, dtype=np.float32),
-                      level=0.0, dynamics=0.0, rms=0.0,
-                      bass=0.0, onset=False, flux=0.0)
+                      bands_slow=np.full(8, 0.35, dtype=np.float32),
+                      level=0.35, dynamics=1.0, rms=0.0,
+                      bass=0.25, onset=False, flux=0.0, swell=0.45)
     dt = 1.0 / args.fps
     started = time.monotonic()
 
@@ -361,10 +342,7 @@ def main() -> int:
                     warned = True
 
             if devices.take_rebuild():
-                sink.rebuild(fan_mode=cfg.fan_mode, fans=cfg.fans,
-                             leds_per_fan=cfg.leds_per_fan,
-                             swap_headers=cfg.swap_headers,
-                             overrides=cfg.fixtures)
+                sink.rebuild(groups=cfg.groups, overrides=cfg.fixtures)
                 geometry = geometry_of(sink.fixtures)
                 canvas = Canvas(geometry)
                 if control is not None:
