@@ -94,6 +94,23 @@ def _base_name(dev, zone, zone_idx: int, used: set) -> str:
     return cand
 
 
+def segment_order(order, count: int) -> list[int]:
+    """Physical slot -> electrical segment. Falls back to identity.
+
+    Anything that isn't a clean permutation is rejected outright rather than
+    partially applied: a half-valid order would silently double-drive one
+    segment and leave another dark, which is far harder to spot than no effect.
+    """
+    if isinstance(order, (list, tuple)) and len(order) >= count:
+        try:
+            seq = [int(x) for x in list(order)[:count]]
+        except (TypeError, ValueError):
+            return list(range(count))
+        if sorted(seq) == list(range(count)):
+            return seq
+    return list(range(count))
+
+
 def _fan_origin(i: int, total: int) -> tuple[float, float]:
     if total <= 1:
         return (0.12, 0.5)
@@ -106,6 +123,12 @@ def resolve(devices, groups: dict | None = None, overrides: dict | None = None,
 
     `groups` carves a zone into rings: {"<device>:<zone>": {"rings": 7,
     "leds_per_ring": 11, "name": "cfan", "mirror": 1, "skip": false}}.
+
+    `order` is a permutation mapping each *physical* slot to the *electrical*
+    segment sitting there, because the sequence fans are wired in is rarely the
+    sequence they are mounted in. Fixture names follow physical order, so a
+    sweep across cfan_a..cfan_j crosses the case in a straight line whatever
+    the cabling does.
     """
     groups = groups or {}
     overrides = overrides or {}
@@ -138,11 +161,16 @@ def resolve(devices, groups: dict | None = None, overrides: dict | None = None,
                 if count < rings:
                     notes.append(f"{zone_key(dev, zi)}: only room for {count} "
                                  f"x {per} (zone has {n})")
+                seq = segment_order(spec.get("order"), count)
+                if spec.get("order") and seq == list(range(count)) and \
+                        list(spec["order"])[:count] != list(range(count)):
+                    notes.append(f"{zone_key(dev, zi)}: order ignored, not a "
+                                 f"permutation of 0..{count - 1}")
                 for k in range(count):
                     name = f"{base}_{chr(ord('a') + k)}" if count > 1 else base
                     fixtures[name] = Fixture(
                         name=name, dev_idx=di, zone_idx=zi, n=per,
-                        offset=offset + k * per * mirror,
+                        offset=offset + seq[k] * per * mirror,
                         pos=np.linspace(0.0, 1.0, per, dtype=np.float32),
                         slow=slow, kind=RING, angle=ring_angles(per),
                         origin=_fan_origin(k, count),

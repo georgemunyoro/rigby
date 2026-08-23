@@ -12,7 +12,7 @@ import threading
 import time
 
 from .config import RigConfig, apply_zone_sizes
-from .patch import zone_key
+from .patch import segment_order, zone_key
 
 MAX_ZONE = 512      # the driver clamps well below this; just a sanity bound
 
@@ -46,6 +46,9 @@ class Devices:
                         "resizable": z.type.name != "SINGLE",
                         "virtual": dev.type.name == "VIRTUAL",
                         "group": self.cfg.groups.get(key) or {},
+                        "order": segment_order(
+                            (self.cfg.groups.get(key) or {}).get("order"),
+                            int((self.cfg.groups.get(key) or {}).get("rings") or 0)),
                         # Ways this zone divides evenly, so a fan count can be
                         # picked off a list instead of worked out by hand.
                         "splits": [[k, n // k] for k in range(2, 33)
@@ -73,10 +76,10 @@ class Devices:
         with self._lock:
             if op == "resize":
                 self._resize(msg)
-            elif op == "chain":
-                self._chain(msg)
             elif op == "group":
                 self._group(msg)
+            elif op == "order":
+                self._order(msg)
             elif op == "calibrate":
                 self._calibrate(msg)
             elif op == "identify":
@@ -109,18 +112,6 @@ class Devices:
         # A zone that grew or shrank changes every offset after it.
         self.rebuild_requested = True
 
-    def _chain(self, msg: dict) -> None:
-        for k, cast in (("fan_mode", str), ("fans", int),
-                        ("leds_per_fan", int), ("swap_headers", bool)):
-            if k in msg:
-                try:
-                    setattr(self.cfg, k, cast(msg[k]))
-                except (TypeError, ValueError):
-                    pass
-        self.cfg.fans = max(1, self.cfg.fans)
-        self.cfg.leds_per_fan = max(1, self.cfg.leds_per_fan)
-        self.rebuild_requested = True
-
     def _group(self, msg: dict) -> None:
         key = msg.get("key")
         if not key:
@@ -141,6 +132,28 @@ class Devices:
             self.cfg.groups[key] = spec
         else:
             self.cfg.groups.pop(key, None)
+        self.rebuild_requested = True
+
+    def _order(self, msg: dict) -> None:
+        key = msg.get("key")
+        spec = dict(self.cfg.groups.get(key) or {})
+        if not key or not spec.get("rings"):
+            return
+        count = int(spec["rings"])
+        want = msg.get("order")
+        if want == "identity":
+            seq = list(range(count))
+        elif want == "reverse":
+            seq = list(range(count))[::-1]
+        else:
+            seq = segment_order(want, count)
+            if list(seq) == list(range(count)) and want and \
+                    sorted(int(x) for x in want) != list(range(count)):
+                self._note(f"{key}: order must use each of 0..{count-1} once")
+                return
+        spec["order"] = seq
+        self.cfg.groups[key] = spec
+        self._note(f"{key}: order {seq}")
         self.rebuild_requested = True
 
     def _calibrate(self, msg: dict) -> None:

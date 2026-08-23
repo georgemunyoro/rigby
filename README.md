@@ -214,6 +214,15 @@ name would work out that it is anything but a strip. Set it in the devices tab,
 which lists each zone's even divisions so a fan count can be picked rather than
 worked out -- 77 LEDs offers `7x11`, 54 offers `3x18`.
 
+**Wiring order is not mounting order.** The `order` field on a group is a
+permutation mapping each *physical* slot to the electrical segment sitting
+there, so `cfan_a..cfan_j` cross the case in a straight line whatever the
+cabling does and sequential effects sweep properly. Edit it in the devices tab:
+one box per physical slot, plus buttons that light a chosen segment so you can
+see where it actually is. An order that isn't a clean permutation is rejected
+outright rather than half-applied, since that would silently double-drive one
+segment and leave another dark.
+
 Virtual devices are skipped: they remap LEDs that are already driven, and
 writing to both would fight over the same hardware.
 

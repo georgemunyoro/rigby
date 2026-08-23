@@ -21,10 +21,6 @@ def default_path() -> Path:
 
 @dataclass
 class RigConfig:
-    fan_mode: str = "mirrored"
-    fans: int = 3
-    leds_per_fan: int = 6
-    swap_headers: bool = False
     # "<device substring>:<zone index>" -> LED count
     zones: dict = field(default_factory=dict)
     # fixture name -> {"spin": 1|-1, "rotate": 0..1}
@@ -43,8 +39,7 @@ class RigConfig:
         except (OSError, json.JSONDecodeError):
             return cls()
         cfg = cls()
-        for k in ("fan_mode", "fans", "leds_per_fan", "swap_headers",
-                  "zones", "fixtures", "groups"):
+        for k in ("zones", "fixtures", "groups"):
             if k in raw:
                 setattr(cfg, k, raw[k])
         return cfg
@@ -54,10 +49,6 @@ class RigConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps({
-            "fan_mode": self.fan_mode,
-            "fans": int(self.fans),
-            "leds_per_fan": int(self.leds_per_fan),
-            "swap_headers": bool(self.swap_headers),
             "zones": self.zones,
             "fixtures": self.fixtures,
             "groups": self.groups,
@@ -66,10 +57,7 @@ class RigConfig:
         return path
 
     def as_dict(self) -> dict:
-        return {"fan_mode": self.fan_mode, "fans": self.fans,
-                "leds_per_fan": self.leds_per_fan,
-                "swap_headers": self.swap_headers,
-                "zones": dict(self.zones), "fixtures": dict(self.fixtures),
+        return {"zones": dict(self.zones), "fixtures": dict(self.fixtures),
                 "groups": dict(self.groups)}
 
 

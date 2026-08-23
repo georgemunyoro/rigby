@@ -318,6 +318,10 @@ th{color:var(--dim);font-weight:400;font-size:11px;letter-spacing:.1em;text-tran
 td input[type=number],td input[type=text]{background:#171a21;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit;font-size:12px}
 .dim{color:var(--dim)}
 button.sp{padding:1px 6px;font-size:10px;margin-right:3px}
+.ordblk{margin-bottom:16px}
+.ordrow{display:flex;gap:7px;flex-wrap:wrap}
+.slot{display:flex;flex-direction:column;gap:3px;font-size:10px}
+.slot input{width:58px;background:#171a21;color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 5px;font:inherit;font-size:12px}
 .frow{display:grid;grid-template-columns:130px 54px 62px 1fr 46px 78px;gap:9px;align-items:center;margin-bottom:7px;font-size:12px}
 </style>
 <div id="err" style="display:none;background:#7f1d1d;color:#fee;padding:8px 18px;font-size:12px"></div>
@@ -361,6 +365,9 @@ button.sp{padding:1px 6px;font-size:10px;margin-right:3px}
 
     <h2>zones &mdash; length, and how to carve them into fixtures</h2>
     <table id="d_zones"></table>
+
+    <h2 style="margin-top:20px">segment order &mdash; wiring order vs mounting order</h2>
+    <div id="d_order"></div>
 
     <h2 style="margin-top:20px">fixtures &mdash; calibrate each ring</h2>
     <div id="d_fixtures"></div>
@@ -532,7 +539,53 @@ function renderDevices(d){
   $('d_fixtures').querySelectorAll('[data-rot]').forEach(r=>r.onchange=()=>
     devCmd({op:'calibrate',fixture:r.dataset.rot,rotate:+r.value}));
 
+  renderOrder(d);
   $('d_notes').textContent=(d.notes||[]).join('\n')+'\n\n'+(d.patch||'');
+}
+
+// Physical slot -> electrical segment. Fixture names follow physical order, so
+// a sweep crosses the case in a line whatever the cabling does.
+function renderOrder(d){
+  const box=$('d_order'); let h='';
+  d.zones.forEach(z=>{
+    const g=z.group||{}, cnt=+(g.rings||0);
+    if(cnt<2) return;
+    const ord=z.order||[], base=g.name||'fixture';
+    h+=`<div class="ordblk" data-k="${z.key}" data-n="${cnt}">
+      <div class="dim" style="margin-bottom:6px">${z.device} / ${z.zone}
+        &mdash; ${cnt} segments of ${g.leds_per_ring}</div><div class="ordrow">`;
+    for(let slot=0;slot<cnt;slot++){
+      h+=`<label class="slot"><span class="dim">${base}_${String.fromCharCode(97+slot)}</span>
+        <input type="number" min="0" max="${cnt-1}" value="${ord[slot]!==undefined?ord[slot]:slot}"
+          data-o="${z.key}" data-slot="${slot}"></label>`;
+    }
+    h+=`</div><div style="margin-top:7px">
+      <button data-oa="${z.key}">apply</button>
+      <button data-oi="${z.key}">identity</button>
+      <button data-or="${z.key}">reverse</button>
+      <span class="dim" style="margin-left:10px">light a segment:</span> `;
+    for(let seg=0;seg<cnt;seg++) h+=`<button class="sp" data-seg="${seg}" data-sk="${z.key}">${seg}</button>`;
+    h+=`</div></div>`;
+  });
+  box.innerHTML=h||'<span class="dim">no zone is carved into segments yet</span>';
+
+  const read=k=>Array.from(box.querySelectorAll(`[data-o="${k}"]`))
+      .sort((a,b)=>a.dataset.slot-b.dataset.slot).map(i=>+i.value);
+  box.querySelectorAll('[data-oa]').forEach(b=>b.onclick=()=>
+    devCmd({op:'order',key:b.dataset.oa,order:read(b.dataset.oa)}));
+  box.querySelectorAll('[data-oi]').forEach(b=>b.onclick=()=>
+    devCmd({op:'order',key:b.dataset.oi,order:'identity'}));
+  box.querySelectorAll('[data-or]').forEach(b=>b.onclick=()=>
+    devCmd({op:'order',key:b.dataset.or,order:'reverse'}));
+  // "light segment N" resolves through the current order to whichever fixture
+  // is sitting on that segment right now.
+  box.querySelectorAll('[data-seg]').forEach(b=>b.onclick=()=>{
+    const z=d.zones.find(x=>x.key===b.dataset.sk)||{};
+    const ord=z.order||[], base=(z.group||{}).name||'fixture';
+    const slot=ord.indexOf(+b.dataset.seg);
+    if(slot<0) return;
+    devCmd({op:'identify',fixture:`${base}_${String.fromCharCode(97+slot)}`,seconds:3});
+  });
 }
 
 function buildRig(){
