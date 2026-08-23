@@ -83,11 +83,18 @@ class Devices:
             elif op == "calibrate":
                 self._calibrate(msg)
             elif op == "identify":
-                secs = float(msg.get("seconds", 2.0))
-                idx = msg.get("led")
-                self.highlight = (msg.get("fixture"),
-                                  None if idx is None else int(idx),
-                                  time.monotonic() + max(0.2, min(secs, 20.0)))
+                name = msg.get("fixture")
+                if name not in self.sink.fixtures:
+                    # Otherwise this dims the rig for a moment and does nothing
+                    # else, which reads as "identify is broken".
+                    self._note(f"identify: no fixture {name!r}")
+                    self.highlight = None
+                else:
+                    secs = float(msg.get("seconds", 2.0))
+                    idx = msg.get("led")
+                    self.highlight = (
+                        name, None if idx is None else int(idx),
+                        time.monotonic() + max(0.2, min(secs, 20.0)))
             elif op == "save":
                 try:
                     p = self.cfg.save(self.cfg_path)

@@ -74,7 +74,16 @@ way when you're hand-setting a colour. Picking `#803C30` puts `(128, 60, 48)` on
 the LED. The show keeps stepping while paused, so switching back resumes
 mid-gesture.
 
-Both tabs mirror the live rig, so the show view doubles as a monitor.
+Both tabs mirror the live rig, so the show view doubles as a monitor. The
+devices tab freezes the show while you're on it, so a rotation offset is judged
+against a still picture rather than a moving one; the playground hands the rig
+over to the canvas entirely.
+
+Anything a rebuild replaces -- the canvas, the geometry -- lives behind a
+mutable holder that handlers dereference per request. HTTP/1.1 keep-alive means
+one handler instance serves a browser for its whole session, so closing over
+those objects leaves an open connection writing into an orphaned canvas after
+any rebuild, and the playground goes quietly dead while still returning 200.
 
 Changing `look` or `duo` rebuilds the look; everything else is written straight
 onto the live objects. `--control-host 0.0.0.0` lets a phone on the same network

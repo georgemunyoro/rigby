@@ -57,6 +57,7 @@ class Params:
     offset_ms: int = 0
     blackout: bool = False
     playground: bool = False
+    pause: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _dirty: set = field(default_factory=set, repr=False)
@@ -150,6 +151,21 @@ class Canvas:
                                        for x in rgb[:3]]
 
 
+class Rig:
+    """Mutable holder for things a rebuild replaces.
+
+    Handlers must dereference this per request rather than closing over the
+    canvas. HTTP/1.1 keep-alive means one handler instance serves a browser for
+    its whole session, so swapping RequestHandlerClass only affects *new*
+    connections -- the open one keeps writing into an orphaned canvas and the
+    playground goes quietly dead after any rebuild.
+    """
+
+    def __init__(self, geometry: dict, canvas: "Canvas"):
+        self.geometry = geometry
+        self.canvas = canvas
+
+
 class Telemetry:
     """Latest analysis values, written by the render loop, read by the UI."""
 
@@ -167,7 +183,7 @@ class Telemetry:
 
 
 def _handler(params: Params, telem: Telemetry, patch_text: str,
-             geometry: dict, canvas: Canvas, devices):
+             rig: Rig, devices):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -192,10 +208,10 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
                 return self._send(200, json.dumps(devices.state()).encode(),
                                   "application/json")
             if self.path.startswith("/patch"):
-                return self._send(200, json.dumps(geometry).encode(),
+                return self._send(200, json.dumps(rig.geometry).encode(),
                                   "application/json")
             if self.path.startswith("/canvas"):
-                return self._send(200, json.dumps(canvas.snapshot()).encode(),
+                return self._send(200, json.dumps(rig.canvas.snapshot()).encode(),
                                   "application/json")
             if self.path in ("/", "/index.html"):
                 return self._send(200, page().encode(), "text/html; charset=utf-8")
@@ -218,7 +234,7 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
                 except json.JSONDecodeError:
                     return self._send(400, b"bad json", "text/plain")
                 if isinstance(msg, dict):
-                    canvas.apply(msg)
+                    rig.canvas.apply(msg)
                 return self._send(200, b"{}", "application/json")
             if not self.path.startswith("/set"):
                 return self._send(404, b"not found", "text/plain")
@@ -242,23 +258,15 @@ class ControlServer:
     """
 
     def __init__(self, params: Params, telem: Telemetry, patch_text: str,
-                 geometry: dict, canvas: Canvas, devices,
+                 rig: Rig, devices,
                  host: str = "127.0.0.1", port: int = 8721):
-        self.params, self.telem, self.canvas = params, telem, canvas
+        self.params, self.telem, self.rig = params, telem, rig
         self._patch_text, self._devices = patch_text, devices
         self.httpd = ThreadingHTTPServer(
-            (host, port),
-            _handler(params, telem, patch_text, geometry, canvas, devices))
+            (host, port), _handler(params, telem, patch_text, rig, devices))
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self._t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-
-    def set_geometry(self, geometry: dict, canvas: Canvas) -> None:
-        """Swap in a new patch after a rebuild, without dropping the server."""
-        self.canvas = canvas
-        self.httpd.RequestHandlerClass = _handler(
-            self.params, self.telem, self._patch_text, geometry, canvas,
-            self._devices)
 
     def start(self) -> None:
         self._t.start()
@@ -461,7 +469,7 @@ function applyHash(){
   if(m==='pg'||m==='playground') setMode('pg',true);
   else if(m==='dev'||m==='devices'){ setMode('dev',true); loadDevices(); }
   else setMode('show',true);
-  send({playground: mode==='pg'});
+  send({playground: mode==='pg', pause: mode==='dev'});
 }
 
 function setMode(m, skipHash){
@@ -473,7 +481,7 @@ function setMode(m, skipHash){
   $('tab_show').className = m==='show'?'on':'';
   $('tab_pg').className   = m==='pg'?'on':'';
   $('tab_dev').className  = m==='dev'?'on':'';
-  send({playground: m==='pg'});
+  send({playground: m==='pg', pause: m==='dev'});
   $('pgnote').textContent = m==='pg'
     ? 'show paused \u00b7 colours are written exactly, no gamma' : '';
 }

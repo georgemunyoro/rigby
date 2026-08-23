@@ -12,7 +12,7 @@ import numpy as np
 
 from .analyze import Analyzer, Features, default_monitor
 from .config import RigConfig, apply_zone_sizes, default_path
-from .control import (REBUILD, Canvas, ControlServer, Params,
+from .control import (REBUILD, Canvas, ControlServer, Params, Rig,
                        Telemetry, geometry_of)
 from .devices import Devices
 from .show import LOOKS
@@ -267,13 +267,13 @@ def main() -> int:
 
     telem = Telemetry()
     geometry = geometry_of(sink.fixtures)
-    canvas = Canvas(geometry)
+    rig = Rig(geometry, Canvas(geometry))
     devices = Devices(sink, cfg, cfg_path)
     control = None
     if args.control:
         try:
             control = ControlServer(params, telem, sink.describe(),
-                                    geometry, canvas, devices,
+                                    rig, devices,
                                     host=args.control_host, port=args.control)
             control.start()
             where = ("localhost" if args.control_host in ("127.0.0.1", "localhost")
@@ -343,10 +343,8 @@ def main() -> int:
 
             if devices.take_rebuild():
                 sink.rebuild(groups=cfg.groups, overrides=cfg.fixtures)
-                geometry = geometry_of(sink.fixtures)
-                canvas = Canvas(geometry)
-                if control is not None:
-                    control.set_geometry(geometry, canvas)
+                rig.geometry = geometry_of(sink.fixtures)
+                rig.canvas = Canvas(rig.geometry)
                 look = build_look()
                 print(f"\npatch rebuilt: "
                       f"{sum(f.n for f in sink.fixtures.values())} leds", flush=True)
@@ -359,14 +357,15 @@ def main() -> int:
                 else:
                     _apply_live(look, an, sink, params, dirty)
 
-            look.step(dt, f)
+            if not params.pause:
+                look.step(dt, f)
             if sink.raw != params.playground:
                 sink.raw = params.playground
                 sink._last.clear()          # curve changed; force a redraw
             if params.playground:
                 # Hand control to the canvas entirely -- the look still steps,
                 # so switching back resumes mid-gesture rather than restarting.
-                cells = canvas.snapshot()
+                cells = rig.canvas.snapshot()
                 frame = {k: np.asarray(cells.get(k, []), dtype=np.float32)
                          .reshape(-1, 3)[:fx.n]
                          for k, fx in sink.fixtures.items()}
