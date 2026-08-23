@@ -31,6 +31,9 @@ Ctrl-C blacks out and exits.
 uv run rigby --look auto --control        # then open http://localhost:8721
 ```
 
+The page lives in `ui.py`, apart from the server: a control surface is a design
+artefact, not request-handling code, and the two change for different reasons.
+
 Every knob is applied to the running show between frames -- no restart, so you
 don't lose the passage you were listening to. The page also shows what the
 analyser thinks is happening (bands, dynamics, swell, pulse, output level, beat

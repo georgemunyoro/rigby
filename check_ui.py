@@ -29,14 +29,15 @@ def main() -> int:
         print("FAIL: no <script> block in page")
         return 1
 
-    for i, line in enumerate(js.split("\n"), 1):
-        if line.count("'") % 2 or line.count('"') % 2:
-            print(f"FAIL: unbalanced quotes on JS line {i}: {line.strip()[:80]}")
-            return 1
-
     node = shutil.which("node")
     if not node:
-        print(f"ok (quote balance only, {len(js)} bytes) -- node not installed")
+        # Crude fallback only. It cannot tell an apostrophe inside a string
+        # from an unterminated one, so it is never allowed to overrule node.
+        for i, line in enumerate(js.split("\n"), 1):
+            if line.count('"') % 2 and "'" not in line:
+                print(f"WARN: possibly unbalanced quotes on JS line {i}: "
+                      f"{line.strip()[:80]}")
+        print(f"ok (heuristic only, {len(js)} bytes) -- node not installed")
         return 0
 
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
