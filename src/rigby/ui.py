@@ -376,6 +376,7 @@ const $=id=>document.getElementById(id);
 const SWATCHES=['#ff3b30','#ff9f0a','#ffd60a','#30d158','#5ee7f5','#0a84ff','#bf5af2','#ffffff'];
 let params=null, geo=null, devState=null, mode='show', tool='paint';
 let painting=false, pending={}, flushT=null, built=false, toastT=null;
+let els={}, lastHex={}, es=null;
 
 function fail(e){ const b=$('err'); b.textContent='ui error: '+(e&&e.message?e.message:e);
   b.style.display='block'; console.error(e); }
@@ -447,7 +448,9 @@ function build(){
   $('clear').onclick=()=>{canvasOp({op:'clear'});toast('cleared');};
   $('grab').onclick=async()=>{ const d=await (await fetch('/state')).json();
     const fr=d.telemetry.frame||{}, cells={};
-    for(const k in fr) cells[k]=fr[k].map(hex2rgb);
+    for(const k in fr){ const h=fr[k], a=[];
+      for(let i=0;i+6<=h.length;i+=6) a.push(hex2rgb('#'+h.slice(i,i+6)));
+      cells[k]=a; }
     canvasOp({op:'load',cells}); toast('captured the current show'); };
   $('d_save').onclick=()=>{devCmd({op:'save'});toast('config saved');};
 
@@ -503,6 +506,7 @@ function paintControls(){
 /* ------------------------------------------------------------------ rig */
 function buildRig(){
   const box=$('rig'); box.innerHTML='';
+  els={}; lastHex={};
   let total=0;
   for(const [name,g] of Object.entries(geo)){
     total+=g.n;
@@ -520,6 +524,7 @@ function buildRig(){
         c.setAttribute('cx',S/2+R*Math.cos(th)); c.setAttribute('cy',S/2+R*Math.sin(th));
         c.setAttribute('r',r); c.setAttribute('class','led'); c.setAttribute('fill','#000');
         c.dataset.fx=name; c.dataset.i=i; svg.appendChild(c);
+        (els[name]=els[name]||[])[i]=c;
       });
       d.appendChild(svg);
     } else if(g.matrix){
@@ -529,14 +534,15 @@ function buildRig(){
         const c=document.createElement('div');
         c.className='cell'+(v===null?' gap':'');
         c.style.width='14px'; c.style.height='14px';
-        if(v!==null){ c.dataset.fx=name; c.dataset.i=v; }
+        if(v!==null){ c.dataset.fx=name; c.dataset.i=v; (els[name]=els[name]||[])[v]=c; }
         gr.appendChild(c);
       }));
       d.appendChild(gr);
     } else {
       const st=document.createElement('div'); st.className='strip';
       for(let i=0;i<g.n;i++){ const c=document.createElement('div');
-        c.className='cell'; c.dataset.fx=name; c.dataset.i=i; st.appendChild(c); }
+        c.className='cell'; c.dataset.fx=name; c.dataset.i=i; st.appendChild(c);
+        (els[name]=els[name]||[])[i]=c; }
       d.appendChild(st);
     }
     box.appendChild(d);
@@ -548,15 +554,25 @@ function buildRig(){
   box.onpointerover=e=>{ if(!painting||mode!=='playground') return;
     const t=e.target; if(t.dataset&&t.dataset.fx) queue(t.dataset.fx,t.dataset.i); };
 }
+// Diff against the previous frame and touch only the LEDs that moved. A
+// querySelector per LED per frame is ~200 lookups at 40Hz over a large DOM,
+// which is its own source of stutter.
 function paintRig(frame){
   if(!geo||!frame) return;
-  const box=$('rig');
-  for(const [name,cols] of Object.entries(frame)){
-    for(let i=0;i<cols.length;i++){
-      const el=box.querySelector(`[data-fx="${name}"][data-i="${i}"]`);
-      if(!el) continue;
-      if(el.tagName==='circle') el.setAttribute('fill',cols[i]);
-      else el.style.background=cols[i];
+  for(const name in frame){
+    const hex=frame[name], list=els[name];
+    if(!list) continue;
+    const prev=lastHex[name];
+    if(prev===hex) continue;
+    lastHex[name]=hex;
+    for(let i=0;i<list.length;i++){
+      const o=i*6, c=hex.slice(o,o+6);
+      if(!c) break;
+      if(prev && prev.slice(o,o+6)===c) continue;
+      const el=list[i]; if(!el) continue;
+      const css='#'+c;
+      if(el.tagName==='circle') el.setAttribute('fill',css);
+      else el.style.background=css;
     }
   }
 }
@@ -667,30 +683,44 @@ function wireZones(d){
     devCmd({op:'identify',fixture:fx,seconds:3}); toast('segment '+b.dataset.seg+' → '+fx); });
 }
 
-/* ----------------------------------------------------------------- poll */
+/* ---------------------------------------------------------------- stream */
 function bar(id,v){ $('b_'+id).style.width=Math.max(0,Math.min(1,v))*100+'%';
   $('v_'+id).textContent=(+v).toFixed(2); }
-async function tick(){
-  try{
-    const d=await (await fetch('/state')).json();
-    if(!params){ params=d.params; build(); }
-    else if(!/^(INPUT|SELECT)$/.test(document.activeElement.tagName)){
-      params=d.params; paintControls(); }
-    const t=d.telemetry||{};
-    $('p_fps').textContent=(t.fps||0).toFixed(0)+' fps';
-    $('p_in').textContent=(t.dbfs==null?'--':(t.dbfs).toFixed(0)+' dBFS');
-    $('p_beat').classList.toggle('on',!!t.onset);
-    $('an_note').textContent = (t.dbfs!=null&&t.dbfs<-90)?'no signal':'';
-    ['level','dynamics','swell','pulse','out'].forEach(k=>bar(k,t[k]||0));
-    const bs=$('bands').children, b=t.bands||[];
-    for(let i=0;i<bs.length;i++) bs[i].style.height=(2+(b[i]||0)*62)+'px';
-    if(!geo){ geo=await (await fetch('/patch')).json(); buildRig(); }
-    paintRig(t.frame);
-    $('live').style.background=(t.fps>1)?'var(--accent)':'var(--warn)';
-    $('err').style.display='none';
-  }catch(e){ fail(e); }
+
+let frameT=null;
+function apply(d){
+  if(!params){ params=d.params; build(); }
+  else if(!/^(INPUT|SELECT)$/.test(document.activeElement.tagName)){
+    params=d.params; paintControls(); }
+  const t=d.telemetry||{};
+  $('p_fps').textContent=(t.fps||0).toFixed(0)+' fps';
+  $('p_in').textContent=(t.dbfs==null?'--':(t.dbfs).toFixed(0)+' dBFS');
+  $('p_beat').classList.toggle('on',!!t.onset);
+  $('an_note').textContent=(t.dbfs!=null&&t.dbfs<-90)?'no signal':'';
+  ['level','dynamics','swell','pulse','out'].forEach(k=>bar(k,t[k]||0));
+  const bs=$('bands').children, b=t.bands||[];
+  for(let i=0;i<bs.length;i++) bs[i].style.height=(2+(b[i]||0)*62)+'px';
+  if(!geo){ fetch('/patch').then(r=>r.json()).then(g=>{geo=g;buildRig();}); }
+  // Coalesce onto the display's own cadence: pushes can outrun a 60Hz screen,
+  // and painting more often than it refreshes is wasted work.
+  if(t.frame){ const fr=t.frame;
+    if(frameT) cancelAnimationFrame(frameT);
+    frameT=requestAnimationFrame(()=>{frameT=null;paintRig(fr);}); }
+  $('live').style.background=(t.fps>1)?'var(--accent)':'var(--warn)';
+  $('err').style.display='none';
 }
-setInterval(tick,100); tick();
+
+function connect(){
+  try{
+    es=new EventSource('/events');
+    es.onmessage=e=>{ try{ apply(JSON.parse(e.data)); }catch(err){ fail(err); } };
+    es.onerror=()=>{ $('live').style.background='var(--warn)'; };  // it retries itself
+  }catch(e){
+    // No EventSource: fall back to polling so the page still works.
+    setInterval(()=>fetch('/state').then(r=>r.json()).then(apply).catch(fail),100);
+  }
+}
+fetch('/state').then(r=>r.json()).then(d=>{apply(d);connect();}).catch(e=>{fail(e);connect();});
 </script>
 """
 

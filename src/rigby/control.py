@@ -150,19 +150,33 @@ class Rig:
 
 
 class Telemetry:
-    """Latest analysis values, written by the render loop, read by the UI."""
+    """Latest analysis values, written by the render loop, read by the UI.
+
+    Versioned and condition-backed so the event stream can block until there
+    is genuinely something new, rather than the browser asking ten times a
+    second and mostly being told nothing changed.
+    """
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._cv = threading.Condition()
         self.data: dict = {}
+        self.version = 0
 
     def set(self, **kw) -> None:
-        with self._lock:
+        with self._cv:
             self.data.update(kw)
+            self.version += 1
+            self._cv.notify_all()
 
     def get(self) -> dict:
-        with self._lock:
+        with self._cv:
             return dict(self.data)
+
+    def wait(self, since: int, timeout: float = 1.0) -> tuple[int, dict]:
+        with self._cv:
+            if self.version == since:
+                self._cv.wait(timeout)
+            return self.version, dict(self.data)
 
 
 def _handler(params: Params, telem: Telemetry, patch_text: str,
@@ -181,7 +195,42 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             self.end_headers()
             self.wfile.write(body)
 
+        def _stream(self):
+            """Server-sent events: one connection, pushed on change.
+
+            SSE rather than websockets because this channel is one-way --
+            controls stay ordinary POSTs -- and EventSource reconnects on its
+            own. Chunked because HTTP/1.1 needs a framing the response length
+            can't provide.
+            """
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+
+            def chunk(payload: bytes) -> None:
+                self.wfile.write(b"%X\r\n" % len(payload) + payload + b"\r\n")
+                self.wfile.flush()
+
+            seen = -1
+            try:
+                while True:
+                    ver, data = telem.wait(seen, 1.0)
+                    if ver == seen:
+                        chunk(b": ping\n\n")      # keep proxies from idling us out
+                        continue
+                    seen = ver
+                    body = json.dumps({"telemetry": data,
+                                       "params": params.snapshot()}).encode()
+                    chunk(b"data: " + body + b"\n\n")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass                                # the tab went away
+
         def do_GET(self):
+            if self.path.startswith("/events"):
+                return self._stream()
             if self.path.startswith("/state"):
                 body = json.dumps({"params": params.snapshot(),
                                    "telemetry": telem.get(),

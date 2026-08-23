@@ -35,16 +35,23 @@ def _meter(f, frame) -> None:
           f"{'HIT' if f.onset else '   '}", end="", flush=True)
 
 
+PUBLISH_HZ = 40          # telemetry pushes per second
+
+
 def _frame_hex(frame) -> dict:
-    """The frame as hex per fixture, so the UI can mirror the real rig."""
+    """The frame as one hex run per fixture.
+
+    A list of 197 "#rrggbb" strings is most of the payload and nearly all of
+    the JSON overhead; one string per fixture that the client slices is a
+    third of the size and far cheaper to build.
+    """
     out = {}
     for name, arr in frame.items():
         a = np.clip(np.asarray(arr, dtype=np.float32), 0.0, 1.0)
         if a.ndim != 2 or a.shape[0] == 0:
-            out[name] = []
+            out[name] = ""
             continue
-        v = (a * 255.0 + 0.5).astype(np.uint8)
-        out[name] = ["#%02x%02x%02x" % tuple(int(c) for c in px) for px in v]
+        out[name] = (a * 255.0 + 0.5).astype(np.uint8).tobytes().hex()
     return out
 
 
@@ -302,6 +309,8 @@ def main() -> int:
     warned = False
     frames = 0
     last_report = time.monotonic()
+    last_pub = 0.0
+    fps_now = 0.0
     # --no-audio is for checking the rig and calibrating it, so it has to be
     # visible. dynamics=0 multiplies every look that respects it down to black,
     # which reads as "the device isn't working".
@@ -394,16 +403,20 @@ def main() -> int:
             if control is not None:
                 frames += 1
                 now = time.monotonic()
-                if now - last_report >= 0.2:
-                    telem.set(frame=_frame_hex(frame),
-                              fps=frames / max(now - last_report, 1e-6),
+                if now - last_report >= 0.5:        # fps over a longer window
+                    fps_now = frames / max(now - last_report, 1e-6)
+                    frames, last_report = 0, now
+                # Publish near frame rate: at 5Hz the UI could never look like
+                # the rig no matter how often the browser asked.
+                if now - last_pub >= 1.0 / PUBLISH_HZ:
+                    last_pub = now
+                    telem.set(frame=_frame_hex(frame), fps=fps_now,
                               dbfs=(20 * np.log10(max(f.rms, 1e-9))),
                               level=f.level, dynamics=f.dynamics,
                               swell=f.swell, pulse=f.pulse, onset=bool(f.onset),
                               bands=[float(x) for x in f.bands],
                               out=max((float(v.max()) for v in frame.values()),
                                       default=0.0))
-                    frames, last_report = 0, now
 
             if args.seconds and time.monotonic() - started >= args.seconds:
                 break

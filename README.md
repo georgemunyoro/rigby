@@ -62,6 +62,27 @@ something you settle once by eye, not a flag you retype.
 CLI flags still win over the saved file, so a one-off run can override
 calibration without editing it.
 
+### Live state
+
+The page is pushed, not polled: `/events` is a server-sent event stream that
+blocks until the telemetry version actually changes, so nothing crosses the
+wire that isn't news. SSE rather than websockets because this channel is
+one-way -- controls stay ordinary POSTs -- and `EventSource` reconnects by
+itself. Polling remains as a fallback.
+
+Three things had to change together, and the transport was the least of them:
+
+| | before | after |
+|---|---|---|
+| telemetry published | 5/sec | **30/sec** |
+| payload | 4,500 B per poll | 2,156 B per event |
+| repaint | `querySelector` per LED per frame | cached refs, changed LEDs only |
+
+The render loop had been publishing every 200ms, so the UI could never be
+smoother than 5fps however fast the browser asked. The frame is now one hex run
+per fixture rather than 197 `"#rrggbb"` strings, and paints are coalesced onto
+`requestAnimationFrame` because pushes can outrun the display.
+
 ### Playground
 
 The **playground** tab draws the rig as it physically is -- rings as rings, the
