@@ -14,6 +14,7 @@ import threading
 from dataclasses import dataclass, field, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .fonts import payload as font_payload
 from .ui import SLIDERS, page
 
 
@@ -228,7 +229,24 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass                                # the tab went away
 
+        def _font(self, key: str):
+            got = font_payload(key)
+            if got is None:
+                return self._send(404, b"no such font", "text/plain")
+            body, gz = got
+            self.send_response(200)
+            self.send_header("Content-Type", "font/ttf")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+            # Immutable: the file only changes if the system font changes.
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
+            if self.path.startswith("/font/"):
+                return self._font(self.path[6:].split("?")[0])
             if self.path.startswith("/events"):
                 return self._stream()
             if self.path.startswith("/state"):
@@ -245,7 +263,7 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             if self.path.startswith("/canvas"):
                 return self._send(200, json.dumps(rig.canvas.snapshot()).encode(),
                                   "application/json")
-            if self.path in ("/", "/index.html"):
+            if self.path.split("?")[0] in ("/", "/index.html"):
                 return self._send(200, page().encode(), "text/html; charset=utf-8")
             self._send(404, b"not found", "text/plain")
 

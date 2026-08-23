@@ -62,6 +62,26 @@ something you settle once by eye, not a flag you retype.
 CLI flags still win over the saved file, so a one-off run can override
 calibration without editing it.
 
+### Typefaces
+
+The UI is set in Fira Sans with Google Sans Code for figures, served by the app
+from wherever fontconfig says they live. Nothing is copied into this repo -- no
+redistribution, no megabytes of base64 in a source file -- and a phone on the
+same network gets the same design as the machine running the show. TTFs are
+gzipped on the way out and marked immutable. If a face isn't installed the CSS
+falls through to a stack that degrades sensibly.
+
+`system-ui` is a different typeface on every machine, so a layout tuned on one
+is wrong everywhere else.
+
+The chrome is deliberately monochrome with a single signal red used only for
+state. Every other hue on screen belongs to the rig, which is the thing you're
+actually meant to be looking at.
+
+Append `?static` to render one frame and stop. An open event stream is a
+request that never finishes, so headless capture never sees the page go idle --
+the UI has to be able to sit still to be screenshotted.
+
 ### Live state
 
 The page is pushed, not polled: `/events` is a server-sent event stream that
