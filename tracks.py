@@ -57,7 +57,8 @@ def dyn(out: Path):
     g[(t >= 8) & (t < 16)] = 10 ** (-18 / 20)
     _write(out / "dyn.wav", x * g)
     (out / "dyn.json").write_text(json.dumps(
-        {"hits": hits, "bpm": bpm, "quiet": [8, 16]}))
+        {"hits": hits, "bpm": bpm, "quiet": [8, 16],
+         "texture_hits": [i * beat / 2 for i in range(int(dur / (beat / 2)))]}))
 
 
 def hard(out: Path):
@@ -88,7 +89,8 @@ def hard(out: Path):
     x += 0.10 * rs.randn(t.size)
     _write(out / "hard.wav", x)
     (out / "hard.json").write_text(json.dumps(
-        {"hits": sorted(hits), "bpm": bpm, "quiet": [0, 0]}))
+        {"hits": sorted(hits), "bpm": bpm, "quiet": [0, 0],
+         "texture_hits": [i * beat / 4 for i in range(int(dur / (beat / 4)))]}))
 
 
 def ballad(out: Path):
@@ -126,9 +128,63 @@ def ballad(out: Path):
         {"hits": ticks, "belt": [16, 24], "quiet": [0, 10]}))
 
 
+def timing(out: Path):
+    """Tempo change, subdivisions, a short breakdown, and digital silence."""
+    dur = 38
+    t = np.arange(SR * dur) / SR
+    rng = np.random.default_rng(30)
+    x = np.zeros_like(t)
+    beats = np.r_[np.arange(2, 18, .5), np.arange(18, 34, .6)]
+    hits, texture = [], []
+    for i, tb in enumerate(beats):
+        if 12 <= tb < 14:
+            continue
+        ph = t - tb
+        decay = _env(ph, .09)
+        x += .8 * np.sin(2*np.pi*60*np.maximum(ph, 0)) * decay
+        if i % 2:
+            x += .2 * rng.standard_normal(t.size) * _env(ph, .035)
+        hits.append(float(tb))
+        if i % 8 == 7:
+            for shift in (.125, .25, .375):
+                tt = tb + shift
+                x += .035 * rng.standard_normal(t.size) * _env(t-tt, .007)
+                texture.append(float(tt))
+    # The silence intervals are truly zero, not an exponential tail.
+    x[(t<2) | ((t>=12)&(t<14)) | (t>=34)] = 0
+    _write(out/'timing.wav', x)
+    (out/'timing.json').write_text(json.dumps(dict(
+        hits=hits, texture_hits=texture, beats=beats.tolist(),
+        silence=[[0,2],[12.8,14],[34.8,38]],
+        sections=[dict(start=2,end=12,bpm=120),dict(start=18,end=34,bpm=100)])))
+
+
+def sustained(out: Path):
+    """Pitched vibrato, plucked strings, quiet ticks, and a loud sustained lift."""
+    t = np.arange(SR * 16) / SR
+    x = np.zeros_like(t)
+    # Integrate frequency to phase: f(t)*t would introduce unintended chirps.
+    frequency = 220 * (1 + .012 * np.sin(2*np.pi*5*t))
+    phase = 2*np.pi*np.cumsum(frequency) / SR
+    envelope = np.interp(t, [0,2,2.3,7,7.7,11,11.5,16], [0,0,.12,.12,.65,.65,0,0])
+    x += envelope * (np.sin(phase) + .25*np.sin(2*phase) + .1*np.sin(3*phase))
+    hits = [4., 9.]
+    rng = np.random.default_rng(12)
+    for tb in hits:
+        x += .10*rng.standard_normal(t.size)*_env(t-tb,.015)
+    _write(out/'sustained.wav', x)
+    (out/'sustained.json').write_text(json.dumps(dict(
+        hits=hits, quiet=[2.5,7], loud=[8,11], silence=[[0,2],[12.5,16]],
+        sustained=[[2.5,3.9],[4.2,7],[8,8.9],[9.2,11]])))
+
+
 if __name__ == "__main__":
     out = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
     out.mkdir(parents=True, exist_ok=True)
-    for fn in (dyn, hard, ballad):
+    for fn in (dyn, hard, ballad, timing, sustained):
         fn(out)
         print(f"  wrote {fn.__name__}")
+
+    (out / "corpus.json").write_text(json.dumps([
+        {"audio": name + ".wav", "annotations": name + ".json"}
+        for name in ("dyn", "hard", "ballad2", "timing", "sustained")], indent=2) + "\n")

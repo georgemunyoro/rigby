@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-LOOKS_LIST = ["auto", "duotone", "rain", "spectrum", "chase"]
+LOOKS_LIST = ["auto", "duotone", "rain", "spectrum", "prism", "chase"]
 DUOS_LIST = ["ember", "toxic", "vapor", "cobalt", "mono"]
 PALETTES_LIST = ["sunset", "cyanmag", "acid", "ice"]
 HIT_STYLES = ["swing", "accent", "white"]
@@ -26,10 +26,16 @@ SLIDERS: dict[str, dict] = {
                        help="Grand master. Scales everything at the output."),
     "gamma":      dict(min=1.0, max=3.0, step=0.05, group="Output",
                        label="Gamma", unit="",
-                       help="Display curve. 2.2 is perceptually linear."),
+                       help="Output brightness curve. Calibrate for your LEDs."),
+    "min_lit": dict(min=0, max=20, step=1, group="Output",
+                    label="Visibility toe", unit="",
+                    help="Lift dim colors smoothly. 0 disables the lift."),
+    "noise_floor_db": dict(min=-100, max=-30, step=1, group="Response",
+                           label="Silence gate", unit=" dBFS",
+                           help="Ignore input below this background level."),
     "gain":       dict(min=0.2, max=4.0, step=0.05, group="Brightness",
                        label="Drive", unit="x",
-                       help="Pre-curve multiplier on control signals."),
+                       help="Brightness drive with a soft shoulder and accent headroom."),
     "curve":      dict(min=0.2, max=1.0, step=0.01, group="Brightness",
                        label="Curve", unit="",
                        help="Below 1 lifts the low end. 1.0 is linear and "
@@ -49,9 +55,9 @@ SLIDERS: dict[str, dict] = {
                         help="dB below the running average that reads as dark. "
                              "Lower is more dramatic."),
     "onset_k":    dict(min=0.5, max=4.0, step=0.05, group="Response",
-                       label="Beat threshold", unit="σ",
+                       label="Attack threshold", unit="σ",
                        help="Standard deviations above recent flux. Raise if "
-                            "beats trigger too eagerly."),
+                            "accents trigger too eagerly."),
     "swing_min_beats": dict(min=1, max=24, step=1, group="Response",
                             label="Swing every", unit=" beats",
                             help="Minimum gap between colour swings. Ordinary "
@@ -69,9 +75,9 @@ OPTS = {"look": LOOKS_LIST, "duo": DUOS_LIST,
 
 OPT_HELP = {
     "look": "auto follows the music's character; duotone is beat-driven, "
-            "rain is swell-driven.",
+            "rain is swell-driven; prism adds travelling colour to spectrum.",
     "duo": "Two-tone relationship: base hue, separation, accent.",
-    "palette": "Hue walk used by the spectrum and chase looks.",
+    "palette": "Hue walk used by spectrum, prism, and chase.",
     "hit_style": "What a beat does to colour.",
 }
 
@@ -312,6 +318,7 @@ pre{font:400 11px/1.7 var(--mono);color:var(--paper-3);white-space:pre-wrap;marg
           <div class="meter"><span class="micro">Dynamics</span><div class="track"><i id="b_dynamics"></i></div><span class="num" id="v_dynamics">-</span></div>
           <div class="meter"><span class="micro">Swell</span><div class="track"><i id="b_swell"></i></div><span class="num" id="v_swell">-</span></div>
           <div class="meter"><span class="micro">Pulse</span><div class="track"><i id="b_pulse"></i></div><span class="num" id="v_pulse">-</span></div>
+          <div class="micro" id="music_status">Waiting for music</div>
           <div class="meter"><span class="micro">Output</span><div class="track"><i id="b_out"></i></div><span class="num" id="v_out">-</span></div>
         </div>
       </div>
@@ -693,7 +700,9 @@ function apply(d){
   $('p_fps').textContent=(t.fps||0).toFixed(0);
   $('p_in').textContent=(t.dbfs==null?'--':(t.dbfs).toFixed(0));
   $('p_beat').classList.toggle('on',!!t.onset);
-  $('an_note').textContent=(t.dbfs!=null&&t.dbfs<-90)?'no signal':'';
+  $('an_note').textContent=(t.presence!=null&&t.presence<.1)?'no signal':'';
+  $('music_status').textContent=(t.bpm&&t.pulse>.3 ? t.bpm.toFixed(1)+' BPM' : 'Tempo uncertain')
+    +' · '+(t.scene||'sparse')+' · audio age '+(t.analysis_age_ms||0).toFixed(0)+' ms';
   ['level','dynamics','swell','pulse','out'].forEach(k=>bar(k,t[k]||0));
   const bs=$('bands').children, b=t.bands||[];
   for(let i=0;i<bs.length;i++) bs[i].style.height=(2+(b[i]||0)*62)+'px';

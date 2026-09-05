@@ -15,6 +15,7 @@ Then:
 
 ```sh
 uv run rigby --look auto                       # picks its own behaviour (start here)
+uv run rigby --look prism                      # spectrum response with moving colour
 uv run rigby --look duotone                    # two-tone rotating rings, beat-driven
 uv run rigby --look rain                       # sparse drops that ramp on swells
 uv run rigby                                   # spectrum look, taps your default sink
@@ -161,10 +162,12 @@ If `in` looks healthy but `out` stays low, reach for the curve:
 | flag | does |
 |---|---|
 | `--curve` | brightness curve, default `0.45`. Below 1 lifts the low end. |
-| `--gain` | pre-curve multiplier, default `1.6` |
+| `--gain` | soft brightness drive, default `1.6` |
 | `--master` | grand master, scales everything at the output |
-| `--dynamics-db` | dB below the running reference that reads as dark, default `22`. Higher = flatter, lower = more dramatic. |
-| `--onset-k` | onset threshold in std devs, default `1.7`. Raise if beats trigger too eagerly. |
+| `--dynamics-db` | dB below the running reference that reads as dark, default `15`. Higher = flatter, lower = more dramatic. |
+| `--onset-k` | attack threshold in std devs, default `1.7`. Raise if accents trigger too eagerly. |
+| `--noise-floor-db` | silence gate, default `-72` dBFS |
+| `--min-lit` | smooth output visibility toe, default `3`; `0` disables it |
 
 Why this knob has to exist: band envelopes spend most of their time around
 0.3-0.5, and output gamma then squares that away to nearly nothing. A chase
@@ -193,16 +196,23 @@ still applies if you're listening on Bluetooth.
 
 ### Capture timing
 
-Capture runs on its own thread into a ring buffer; the render loop samples the
-newest window on a wall clock. This is not incidental -- PulseAudio delivers
-audio in ~340ms bursts by default, so reading one hop per rendered frame
-produces 20 instant frames then a 340ms freeze, and any backlog becomes
-permanent latency that keeps animating after the music stops. `parecord` is also
-asked for `--latency-msec=20`.
+Audio is analyzed on a fixed 100 Hz sample clock, independently of `--fps`.
+The capture worker processes every 480-sample hop. Renderers interpolate a
+bounded history of continuous features and consume timestamped attacks once.
+Capture bursts do not insert repeated windows into the onset detector; a slow
+renderer discards attacks older than 150 ms instead of replaying a backlog.
 
-Measured: 60.2 fps, frame interval p50 16.66ms / max 20.9ms, zero bursts, and
-+9ms of lag beyond the raw tap. A stalled source (suspended sink, paused stream)
-fades to dark in ~800ms rather than looping on stale audio.
+`--offset-ms` delays features by up to 2000 ms and drains the delay at file EOF.
+Changing the offset cannot replay an event already delivered. Capture stalls
+fade the last picture and reduce beat confidence. A long stall discards the
+old rhythm history. Envelope coefficients are expressed in seconds.
+
+The control UI reports audio arrival age and estimated tempo. Arrival age is
+**not** physical speaker-to-LED latency: it excludes upstream audio buffering,
+controller buffering, and the LED's response. Start with offset 0 on wired
+output; use a recorded click/light comparison to calibrate a device. Adding
+an offset only delays lights. It cannot compensate for an already late attack.
+Predictable movement uses the beat clock while unexpected attacks remain causal.
 
 ### Checking the UI
 
@@ -221,22 +231,67 @@ be driven headlessly for testing.
 
 ## Benchmarks
 
-`bench.py` scores onset accuracy, dynamics and smoothness against synthetic
-tracks with known beat times. The tracks aren't in git -- regenerate them:
-
 ```sh
+uv run python -m unittest discover -s tests -v
+uv run python check_ui.py
 uv run python tracks.py /tmp/rigby-tracks
-uv run python bench.py /tmp/rigby-tracks/dyn.wav /tmp/rigby-tracks/dyn.json
+uv run python bench.py --corpus /tmp/rigby-tracks/corpus.json --look auto \
+  --trace /tmp/rigby-trace.json
+uv run python bench.py /tmp/rigby-tracks/timing.wav /tmp/rigby-tracks/timing.json --fps 30
 ```
 
-Every seed is fixed, so the numbers reproduce exactly.
+The fixtures cover rhythmic dynamics, dense percussion, a ballad, sustained
+vibrato, silence, tempo changes, fills, and a short breakdown. Unit tests also
+exercise pure tones, noise gating, capture bursts, stale frames, offset changes,
+EOF draining, and rendering at 30/60/120 FPS.
+
+Scores use all fixture pixels after the same output conversion as the sink,
+with simulated 60 Hz fast / 12 Hz slow device cadence. JSON reports include
+one-to-one attack precision/recall, signed timestamp bias, 95th percentile
+absolute timestamp error, event delivery delay, beat phase error, tempo recovery,
+section brightness, silence brightness, clipping, and motion between accents.
+`motion_delta` describes movement; a lower number alone is not a quality score.
+Device simulation does not measure physical hardware latency.
+
+Annotations use seconds:
+
+```json
+{
+  "hits": [2.0, 2.5, 3.0],
+  "texture_hits": [2.25, 2.75],
+  "beats": [2.0, 2.5, 3.0, 3.5],
+  "quiet": [[2.0, 4.0]],
+  "loud": [[8.0, 12.0]],
+  "silence": [[0.0, 1.8]],
+  "sustained": [[4.2, 7.8]],
+  "sections": [{"start": 2.0, "end": 12.0, "bpm": 120}]
+}
+```
+
+`hits` are primary attacks; optional `texture_hits` include hats or other fine
+percussion. Overall onset scores use their union, while `primary_recall` keeps
+weak/extra textures from hiding missed main hits. Annotations without texture
+hits count any detected textures as false positives. `beats` describes the
+underlying grid, including beats through rests; constant-tempo files may use
+`bpm` and `beat_offset` instead. Brightness windows come from annotations, never
+hardcoded positions. Allow time for intended fades when annotating silence.
+
+A real-music corpus is a JSON list of `{"audio": "song.flac", "annotations":
+"song.json"}` entries, with paths relative to the manifest. Audio stays outside
+the repository. Use `--corpus` and `--trace` to inspect your own recordings.
+For a listening comparison, replay the same excerpts at the same input volume,
+master, gamma, palette, and offset. Check whether movement stays in time, fills
+preserve the motif, verses retain space, and a chorus expands coherently. Include
+acoustic music, vocals, sparse percussion, and changing tempos; synthetic scores
+cannot establish that a show feels natural on real hardware.
 
 ## Layout
 
 | module | role |
 |---|---|
 | `patch.py` | fixture definitions, resolved against live devices by name |
-| `analyze.py` | audio tap -> log-spaced bands, envelopes, spectral-flux onsets |
+| `analyze.py` | fixed-rate audio analysis, gated bands, timestamped attacks |
+| `music.py` | tempo/phase tracking and conservative arrangement decisions |
 | `fx.py` | the desk FX primitive (waveform x rate x spread), HSV, palettes |
 | `sink.py` | OpenRGB output, per-device tick rates, dirty checks |
 | `show.py` | looks: layered wash + movement + hits |
@@ -322,210 +377,134 @@ at a time so you can read the physical order off the case.
 whole rig, so they're marked `slow` in `PATCH_SPEC` and get ~12fps plus a dirty
 check. Keep them as wash fixtures; put detail on the HID devices.
 
-## The duotone look
+## Musical behavior
 
-`--look duotone` is the one that tries to stop looking like a visualiser. Three
-things do that work, none of which are about amplitude:
+`auto` is the default look. It combines `duotone` movement with `rain` using both
+rhythmic confidence and arrangement energy. The individual looks can be selected directly, and `chase` remains an intentionally audio-independent
+fixture check. `--no-audio` supplies visible calibration features.
 
-- **Intrinsic movement.** The rings rotate whether or not anything is playing;
-  music modulates the rotation rather than driving brightness directly.
-  Measured: +0.302 / -0.302 / +0.302 / -0.302 turns/sec across fan_a, fan_b,
-  fan_c and the AIO.
-- **Phase relationships.** A third of a turn of spread per fan, plus
-  counter-rotation on fan_b and the AIO. Three identical rings spinning in
-  unison read as one object; opposed, they read as three. Measured: all three
-  fans peak on the same LED in only 3.6% of frames.
-- **Beats as colour events, not white flashes.** Each onset swings *one half*
-  of *one* ring to the opposite of the colour wheel while everything else keeps
-  running, cycling round the rings and alternating halves. Measured over 46 beats: hits distributed
-  11/12/12/11 across the four rings, halves alternating exactly 23/23. Every
-  fourth beat reverses the whole rig's spin direction, so a four-bar loop
-  doesn't look like one bar.
+For a consistent look throughout a playlist, use `--look duotone`,
+`--look spectrum`, or `--look rain`. These respond to sustained attack density
+as well as relative loudness, so a steady drum-heavy track can stay energetic
+without needing to get progressively louder or maintain a confident beat lock.
 
-### Gesture vocabulary
+- **Duotone:** energetic grooves recruit more rings and use faster gestures.
+  Even arrangements get a fresh motif every 16 tracked beats (with a minimum
+  six-second hold); without reliable timing, changes stay slower. Accents move
+  between fixtures using subdivisions and drum roles.
+- **Prism:** spectrum's response with a restrained, slow two-tone colour
+  pattern. Strong low/mid accents and sustained lifts shift the whole palette,
+  with at least six seconds between shifts. Quiet sections reduce movement and
+  brightness promptly, leaving room for the next drop. `--palette` sets the spectral
+  colour base; `--duo` sets the moving pair. Slow fixtures use gentler movement
+  and colour transitions.
+- **Spectrum:** energetic passages open moving gaps in the wash, with fast band
+  activity and local drum accents filling them. This preserves visible movement
+  when the underlying spectrum stays loud and steady.
+- **Rain:** soft passages retain gentle drops. Percussive passages add short,
+  sharp splashes; kicks can reach two fast fixtures, while high accents stay
+  small. Slow bus fixtures keep their smoother washes.
 
-A single behaviour plus a direction flip is still a single behaviour: it reads
-as swirling back and forth and stops being interesting after about a minute.
-Rings pick from seven gestures -- `spin`, `lobes`, `pingpong`, `breathe`,
-`wipe`, `sparkle`, `converge` -- and change on a phrase boundary
-(`PHRASE_BEATS` onsets), or on a timer when there's no beat to count. Each
-instance re-rolls its own rate, width, lobe count, direction and per-ring
-spread, and gestures crossfade over `XFADE_S` so nothing snaps.
+Rhythmic intensity rises over roughly a second and relaxes over a few seconds.
+It is an activity estimate, not a genre classifier; gain and curve still control
+brightness separately.
 
-They are measurably different motions, not reskins:
+### Audio features and silence
 
-| gesture | rotation (turns/s) | spatial variance | duty |
-|---|---|---|---|
-| spin | +0.35 | 0.21 | 0.57 |
-| lobes | -0.90 | 0.04 | 1.00 |
-| pingpong | 0.00 | 0.24 | 0.57 |
-| breathe | +0.05 | 0.16 | 0.87 |
-| wipe | +0.03 | 0.11 | 1.00 |
-| sparkle | +0.70 | 0.16 | 1.00 |
-| converge | 0.00 | 0.28 | 0.57 |
+Bands retain their spectral balance. Each band's adaptive gain is bounded by a
+common broadband reference, and insignificant energy is suppressed. A 1 kHz
+tone should light the midrange without generating bass from FFT leakage. Bass
+has its own 40–120 Hz reference. `balance` exposes actual spectral energy shares
+separately from the normalized activity envelopes.
 
-### Saturation and legibility
+`--noise-floor-db` (default -72 dBFS) sets the minimum signal gate. Hysteresis
+and a short release distinguish brief rests from silence. Long silence clears
+gain and beat history; quiet active music still has a small intensity floor.
+Lower the gate if a deliberately quiet monitor tap is being suppressed.
 
-Flat full saturation is why animation is hard to read on a 6-LED fan. A
-saturated hue carries very little *luminance* -- pure red is about 21% of white
--- so an arc's falloff disappears and you see one lit LED jumping rather than a
-light sweeping. Measured before: 77% of pixels above saturation 0.9.
+`dynamics` follows loudness relative to an active-audio reference with a running
+mean during warm-up and a 25-second long-term time constant. `swell` follows
+sustained relative loudness. Energy slope and smoothed spectral change describe
+builds and arrangement changes. `mid_share` measures energy from 200–4000 Hz;
+it is not a vocal detector. Causal analysis cannot know at the beginning of a
+song whether the opening will later prove quiet relative to its chorus.
 
-Colour now runs a **hot core**: saturation falls as intensity rises, so the
-bright head desaturates toward white and the coloured tail stays visible behind
-it. That's how a real fixture behaves, and it gives the eye a highlight to
-track.
+### Attacks, beats, and bar hypotheses
 
-| | old (flat, full sat) | default (`--saturation 0.88 --hot 0.5`) |
+Attack detection uses log-compressed, semitone-grouped spectral flux, a frequency
+maximum filter to suppress pitch motion, energy-rise support, adaptive thresholds,
+and independent refractory times for low/mid/high evidence. Broadband attacks
+are assigned a dominant role. Events carry estimated audio time, strength, and
+confidence. Roles are approximate frequency descriptions, not instrument labels.
+The frequency-maximum approach is inspired by
+[SuperFlux](https://www.dafx.de/paper-archive/details.php?id=0oee-99Z88WL7pSo749gcA).
+
+The beat clock evaluates up to six seconds of history, starts estimating after
+two seconds, and searches 55–180 BPM. Autocorrelation, attack/grid coherence,
+and tempo continuity determine confidence. A phase loop corrects gradually;
+short breaks retain musical time, while prolonged silence forgets the grid.
+Tempo and phase estimates are heuristic: half/double-time ambiguity, rubato,
+and very sparse rhythms can remain uncertain. No additional dependency or
+model download is required.
+
+An onset never increments a beat counter. Four-beat bar position has a separate
+accent-based confidence; uniform beats provide no downbeat evidence. This is a
+4/4 hypothesis, not general meter recognition or a verse/chorus classifier.
+When bar evidence is weak, transitions use a beat boundary rather than claiming
+a phrase boundary.
+
+### Movement and structure
+
+Movement runs at musical divisions: the base chase spans four beats and gesture
+rates select half, normal, or double speed. Energy changes width, fixture
+coverage, and intensity rather than accelerating a chase between hits.
+With uncertain tempo the movement falls back to a slow, continuous drift.
+
+The arrangement director chooses among stable behaviors:
+
+| behavior | movement vocabulary | visual intent |
 |---|---|---|
-| pixels above sat 0.9 | 77% | **11%** |
-| peak perceived luminance | 0.204 | **0.360** |
-| luminance span across a fan | 0.181 | **0.325** |
-| frame-to-frame motion signal | 0.0090 | **0.0139** |
+| sparse | breathe, converge | retain gaps and a small motif |
+| groove | spin, pingpong, lobes | repeat movement aligned to rhythm |
+| build | converge, wipe | widen and recruit fixtures |
+| full | lobes, spin, sparkle | expand coverage while preserving accent headroom |
 
-Confirmed on hardware: luminance span 0.158 -> 0.209, saturation 0.74 -> 0.60.
+Changes require persistent evidence and a minimum hold time. With a confident
+clock they land on a beat or credible bar boundary and crossfade. Smoothed
+spectral novelty can refresh a motif after a longer hold. Randomness chooses
+within a suitable vocabulary; drum fills do not advance a phrase counter or
+reverse every ring.
 
-Note the contrast *ratio* barely moves (0.803 -> 0.829) -- it's the absolute
-span that nearly doubles, which is what matters at these light levels. Arcs are
-also never allowed to span less than about 1.5 LEDs, since a 0.15-turn arc on a
-six-LED ring is a single pixel. `--saturation 1.0 --hot 0` restores the old
-flat look.
+Low attacks widen rings, mid attacks create local accents, and high attacks
+produce smaller texture. Strength, confidence, and event age scale their
+amplitude. Slow fixtures keep a wash instead of receiving short flashes.
+Rain gates accents more strictly without a beat and puts each on one fast
+fixture. Its particles keep their accent hue through their lifetime, and a
+zero birth rate produces no particles. Density expands into a sustained wash
+as the music grows.
 
-### What a beat does to colour
+### Color and output calibration
 
-`--hit-style swing` (default) swings the hit region to the far side of the
-wheel instead of flashing white. Two details make it work:
+`--duo ember|toxic|vapor|cobalt|mono` selects the two-tone relationship.
+`--hue-drift 0` pins it. `--saturation` and `--hot` set color intensity and
+highlight desaturation; arcs remain wide enough to read on coarse fan rings.
+`--hit-style swing|accent|white` sets accent treatment. Color swings are spaced
+in musical time and selected by relative impact.
 
-- It **replaces** rather than adds. Adding a complementary hue on top of an
-  existing one sums to white, which is the thing being avoided -- the old
-  accent-on-top flash trended white whatever accent hue it used.
-- Colour weight and brightness are **separate**. Scaling the blend weight by
-  hit strength only ever half-blends the hue, landing between the two tones and
-  reading as neither; the hue now swings fully and `lum_scale` decides how hard
-  it lands.
+`drive()` has a soft shoulder instead of clipping every input above 0.625.
+Headroom is reserved in the layer mixer, without an additional drive multiplier.
+Mixed colors are normalized before intensity is applied, so overlapping hues do
+not accidentally dim one another. Auto crossfades in approximate emitted-light
+space to avoid dark dips between patterns. Scene coverage is applied inside the
+look rather than also reducing its crossfade weight. `--gain` and `--curve` shape the picture, then
+`--master`, `--gamma`, and `--min-lit` shape device output. The visibility toe
+(default 3 raw output units) fades smoothly and preserves absent color channels;
+set it to 0 to disable it. Master 0 always sends black.
 
-**Swings are rationed.** A colour change only has impact if it's rare, so
-ordinary beats get the plain flash and the swing is saved for hits that earn
-it. The test is relative -- beat your own recent neighbours on
-`onset_strength * dynamics` -- with a floor on spacing so it stays an event and
-a ceiling so it doesn't vanish on very even material. A fixed threshold cannot
-work across tracks: the top decile of impact is 0.95 on material with varied
-hits and 0.55 on a uniform four-to-the-floor, so any constant either swings on
-everything or on nothing.
-
-| track | beats | swings | swing impact vs all beats | mean gap |
-|---|---|---|---|---|
-| varied, with a quiet section | 46 | 5 (11%) | 0.72 vs 0.49 | 4.7s |
-| dense, uniform kicks | 69 | 8 (12%) | 0.53 vs 0.43 | 3.1s |
-
-None of the five swings on the first track land in its quiet section.
-`--swing-min-beats` tunes the rate (1 -> 52%, 3 -> 20%, 6 -> 11%, 12 -> 7%).
-
-It swings to the point opposite the pair's *midpoint*, not the complement of
-the primary -- the complement of the primary sits on top of the secondary,
-since the two tones are already about half a turn apart, so the "swing" would
-just swap the colours over. Measured on the hit LED:
-
-| style | saturation | dist. from primary | from secondary |
-|---|---|---|---|
-| `white` | 0.44 | 0.094 | 0.416 |
-| `accent` | 1.00 | 0.070 | 0.481 |
-| `swing` | **1.00** | **0.219** | **0.219** |
-
-For a pair spanning ~0.5 turns, 0.25 is the furthest any hue can be from both,
-so 0.219 is close to the ceiling. `--hit-style white` restores the old flash.
-
-### Colour
-
-`--duo ember|toxic|vapor|cobalt|mono` sets a two-tone *relationship* -- base
-hue, separation, accent offset -- not two fixed colours. The base drifts right
-around the wheel over ~5 minutes and the separation breathes between roughly
-0.43 and 0.60 turns, so the pair keeps changing character without ever
-collapsing into one muddy colour. Storing fixed hues is why a rig ends up
-looking like the same red and blue forever. `--hue-drift 0` pins it; higher
-values speed it up.
-
-## Music without a usable beat
-
-Slow melodic material defeats beat detection outright. Its onset envelope has
-no periodicity to lock onto, so a beat-driven look either sits still or invents
-a pulse that isn't there -- measured, the detector fired **84 times on a ballad
-with 4 real ticks**.
-
-`--look auto` runs both behaviours and crossfades on `pulse`, so a track that
-drifts in and out of having a beat drifts between them and nothing snaps:
-
-| track | pulse settles at | behaviour |
-|---|---|---|
-| dyn (128bpm, kick+snare) | 0.67 | beat-driven |
-| hard (dense, syncopated) | 0.99 | beat-driven |
-| ballad (sustained, 4 ticks) | 0.14 | rain |
-
-**`pulse`** is the periodicity of the onset envelope -- autocorrelation over 6s
-in the 40-180 BPM lag range. Two things had to be right for this to work at all:
-the envelope must be detrended against a local moving average first (otherwise
-slow drift dominates and *every* track scores ~0.70), and the test material must
-not contain a periodic LFO, which will happily masquerade as a beat.
-
-**`swell`** is sustained loudness in dB against the song's own average, weighted
-by how much energy sits in the vocal range. It drives `rain`: drop density and
-brightness rise with it, and above a knee the gaps fill in so the pattern
-crossfades from discrete drops to a continuous glow with no mode change.
-
-Drops have an attack, not just a decay -- spawning at full brightness in one
-frame is a pop, not a raindrop -- and arrive on exponential inter-arrival times,
-because a fractional carry spawns at exactly even spacing and reads as a
-metronome. Blobs widen on the coarse 6-LED fan rings, where a narrow one is
-just a single LED blinking. Measured on a ballad: mean frame delta 1.47 -> 0.69
-on the AIO and 2.22 -> 0.64 on a fan, worst single-frame jump 241 -> 108.
-Measured on hardware across a ballad's arc:
-
-| section | AIO LEDs lit | peak |
-|---|---|---|
-| verse | 5.4 / 18 | 113 |
-| build | 9.5 / 18 | 642 |
-| belt | 13.0 / 18 | 628 |
-| outro | 0 / 18 | 10 |
-
-**The reference must be an average, not a decaying max.** Against a max, a slow
-build tracks its own reference upward and reads 1.0 the whole way -- verse and
-chorus come out identical, which is exactly the bug that made ballads look flat.
-The same mistake in `vox_peak` made the swell run *backwards*.
-
-## Dynamics and beats
-
-Two things are deliberately separated:
-
-- **Band auto-gain** normalises each band against its own recent peak. That's
-  what makes the spectrum readable at any volume -- and on its own it destroys
-  dynamics, since a quiet passage gets amplified straight back up.
-- **`dynamics`** measures loudness in dB against a slow reference (~45s
-  half-life) and is applied as a master intensity. Shape and loudness stay
-  separate concerns.
-
-Onsets are peak-picked from spectral flux over **40-400 Hz only**. Measuring
-flux across half the spectrum meant sustained pads and hi-hats counted as
-transients. Detection requires a genuine local maximum (one frame of lookahead),
-a threshold of mean + `k`*std over recent flux, and a refractory gap.
-
-Scored against synthetic tracks with known beat times (`bench.py`):
-
-| | before | after |
-|---|---|---|
-| onsets fired (51 real) | 566 | 46 |
-| precision | 0.088 | **1.00** |
-| f1 | 0.162 | **0.948** |
-| loud vs quiet brightness | 1.1x | **8.2x** |
-| frame-to-frame jitter | 5.8% | **4.3%** |
-
-On a deliberately hard mix -- dense pad, 16th hats, noise floor, syncopated
-kicks -- precision 1.00 / recall 0.99.
-
-**Measure output post-gamma.** An early version of the benchmark scored
-brightness before gamma and 8-bit quantisation, which hid that quiet passages
-were going *fully black* on hardware: with gamma 2.2, any perceptual value below
-~0.11 quantises to zero. `sink.MIN_LIT` now guarantees a non-zero intent never
-lands on zero.
+The control preview uses the same conversion as the hardware and benchmark.
+Calibrate against the complete chain on your LEDs: establish master/gamma/toe,
+then adjust drive so normal passages leave visible room for accents. Preview
+colors and simulated cadence cannot replace a physical brightness/latency check.
 
 ## Writing a look
 
@@ -538,13 +517,14 @@ v = fx.wave("sine", self.chase, fix.pos, spread=2.0, size=1.0)
 
 waveform x phase x spread across the fixture. Sine on intensity with spread is
 the classic truss wave; `step` on hue with zero spread is a colour chase. Merge
-layers with `fx.htp()` — highest takes precedence, same as a real desk.
+intensity layers with `fx.htp()`; combine colored layers with `fx.mix_layers()`
+to retain headroom. Use `f.events` for attacks and `f.beat_position` for musical
+position. Envelopes should use `music.alpha(dt, tau)` rather than frame constants.
 
 ## Not built yet
 
-- **Tap tempo / beat tracking.** Effect rate currently rides on broadband level.
-  Real beat tracking (`aubio`) would let effects run on musical time — 1/4, 1/8,
-  bar — and hold phase through breakdowns.
+- **Tap tempo and meter override.** Manual correction for ambiguous beat grids
+  and music outside the automatic tempo/meter assumptions.
 - **Cue stack.** Ordered looks with fade/wait times and a GO trigger.
 - **MIDI.** A nanoKONTROL2 or APC Mini turns this into an actual desk: faders to
   layer intensities, pads to cue GO and flash.

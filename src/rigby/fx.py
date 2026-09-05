@@ -125,15 +125,49 @@ def hsv(h, s, v) -> np.ndarray:
 
 
 def drive(x, gain: float = 1.6, curve: float = 0.45, floor: float = 0.0):
-    """Shape a normalised control signal into a usable brightness range.
+    """Soft shoulder without a second master dimmer; mixers reserve headroom."""
+    y = np.maximum(0.0, (np.asarray(x) - floor) / max(1e-6, 1.0 - floor))
+    return (-np.expm1(-max(0., gain) * y)) ** max(.05, curve)
 
-    Band envelopes spend most of their time around 0.3-0.5, and output gamma
-    then squares that away to nearly nothing -- which is why a chase (whose
-    bump peaks at exactly 1.0) looks bright while a spectrum look looks dead.
-    `curve` < 1 expands the low end back up; `gain` is a plain pre-multiplier.
+
+def mix_layers(*layers, ceiling=.88):
+    """Blend chroma separately from intensity, preserving output headroom."""
+    weights = [np.max(layer, axis=-1, keepdims=True) for layer in layers]
+    total = sum(weights)
+    color = sum(layers) / np.maximum(total, 1e-9)
+    # Mixing different hues reduces the RGB peak. Restore unit chroma before
+    # applying intensity, otherwise overlap secretly adds another dimmer.
+    color = color / np.maximum(color.max(axis=-1, keepdims=True), 1e-9)
+    intensity = 1.0 - np.prod([1.0 - np.clip(w, 0, 1) for w in weights], axis=0)
+    return color * np.minimum(intensity, ceiling)
+
+
+def crossfade(a, b, weight):
+    """Blend approximate emitted light, avoiding a dark dip between patterns.
+
+    Looks work in perceptual RGB. A fixed 2.2 blend curve approximates the
+    default output transfer; user gamma remains a separate device calibration.
     """
-    y = (np.clip(x, 0.0, 1.0) - floor) / max(1e-6, 1.0 - floor)
-    return np.clip(np.clip(y, 0.0, 1.0) * gain, 0.0, 1.0) ** curve
+    w = np.clip(weight, 0., 1.)
+    return (np.clip(a, 0, 1) ** 2.2 * w + np.clip(b, 0, 1) ** 2.2 * (1-w)) ** (1/2.2)
+
+
+def encode_rgb(rgb, g=2.2, master=1.0, min_lit=3, raw=False):
+    """Shared hardware/benchmark conversion, including a smooth visibility toe.
+
+    The toe follows the LED's color ratios and fades to zero. It cannot turn a
+    zero master into a nonzero output or lift absent channels into white.
+    """
+    value = np.clip(np.nan_to_num(np.asarray(rgb), nan=0., posinf=1., neginf=0.)
+                    * np.clip(master, 0, 1), 0, 1)
+    if raw:
+        return (value * 255 + .5).astype(np.uint8)
+    peak = value.max(axis=-1, keepdims=True)
+    toe = np.clip(peak / .08, 0, 1)
+    toe = toe * toe * (3 - 2 * toe)
+    floor = np.clip(min_lit, 0, 20) * toe * value / np.maximum(peak, 1e-9)
+    output = gamma(value, max(.1, g)) * (255 - np.clip(min_lit, 0, 20)) + floor
+    return np.clip(output + .5, 0, 255).astype(np.uint8)
 
 
 def gamma(rgb: np.ndarray, g: float = 2.2) -> np.ndarray:

@@ -16,22 +16,21 @@ from openrgb.utils import RGBColor
 
 from openrgb.utils import ModeFlags
 
-from .fx import gamma
+from .fx import encode_rgb
 from .patch import Fixture, resolve
 
 FAST_HZ = 60.0
 SLOW_HZ = 12.0
 
-# With gamma 2.2 on 8-bit LEDs, every perceptual value below ~0.11 quantises to
-# zero -- so quiet passages don't dim, they switch off. Any non-zero intent gets
-# at least this raw value so the bottom of the range stays visible.
+# Default visibility toe. Unlike an unconditional floor, it smoothly fades to
+# zero and is applied after master intensity, preserving blackout and hue.
 MIN_LIT = 3
 
 
 class Sink:
     def __init__(self, host: str = "127.0.0.1", port: int = 6742,
                  gamma_val: float = 2.2, master: float = 1.0,
-                 raw: bool = False,
+                 raw: bool = False, min_lit: int = MIN_LIT,
                  groups: dict | None = None, overrides: dict | None = None):
         self.client = OpenRGBClient(host, port, "rigby")
         self._patch_kw = dict(groups=groups or {}, overrides=overrides or {})
@@ -39,6 +38,8 @@ class Sink:
                                               **self._patch_kw)
         self.gamma = gamma_val
         self.master = master
+        self.min_lit = min_lit
+        self.write_ms = 0.0
         # Playground mode writes what you picked. Gamma is right for shaping an
         # effect's brightness, but when hand-setting a colour it just means the
         # LED doesn't match the swatch.
@@ -118,6 +119,11 @@ class Sink:
             lines.append(f"  (not present: {', '.join(self.missing)})")
         return "\n".join(lines)
 
+    def preview(self, frame):
+        """Post-output-curve preview; transport timing still depends on hardware."""
+        return {k: encode_rgb(v, self.gamma, self.master, self.min_lit, self.raw) / 255.
+                for k, v in frame.items()}
+
     def write(self, frame: dict[str, np.ndarray]) -> None:
         """frame maps fixture name -> (n,3) float RGB in 0..1."""
         now = time.monotonic()
@@ -127,6 +133,10 @@ class Sink:
             if now < self._next.get(dev_idx, 0.0):
                 continue
 
+            period = 1.0 / (SLOW_HZ if slow else FAST_HZ)
+            previous_due = self._next.get(dev_idx, now)
+            next_due = (now + period if slow else
+                        previous_due + (int(max(0., now-previous_due) / period) + 1) * period)
             dev = self.client.devices[dev_idx]
             buf = np.zeros((len(dev.leds), 3), dtype=np.float32)
 
@@ -142,20 +152,12 @@ class Sink:
                 end = min(f.offset + len(block), len(buf))
                 buf[f.offset:end] = block[: end - f.offset]
 
-            if self.raw:
-                out = np.clip(buf * self.master * 255.0 + 0.5,
-                              0, 255).astype(np.uint8)
-            else:
-                lit = buf > 1e-4
-                buf = gamma(buf * self.master, self.gamma)
-                scaled = buf * (255.0 - MIN_LIT) + MIN_LIT
-                out = np.clip(np.where(lit, scaled, 0.0) + 0.5,
-                              0, 255).astype(np.uint8)
+            out = encode_rgb(buf, self.gamma, self.master, self.min_lit, self.raw)
 
             prev = self._last.get(dev_idx)
             if prev is not None and np.array_equal(prev, out):
                 # Nothing changed -- don't spend bus time saying so.
-                self._next[dev_idx] = now + 1.0 / (SLOW_HZ if slow else FAST_HZ)
+                self._next[dev_idx] = next_due
                 continue
 
             try:
@@ -168,7 +170,9 @@ class Sink:
                 continue
 
             self._last[dev_idx] = out
-            self._next[dev_idx] = now + 1.0 / (SLOW_HZ if slow else FAST_HZ)
+            self._next[dev_idx] = next_due
+
+        self.write_ms = (time.monotonic() - now) * 1000
 
     def blackout(self) -> None:
         black = {n: np.zeros((f.n, 3), dtype=np.float32)

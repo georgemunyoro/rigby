@@ -75,6 +75,11 @@ def _apply_live(look, an, sink, params, dirty) -> None:
                 obj.palette = val
         elif name == "master":
             sink.master = val
+        elif name == "min_lit":
+            sink.min_lit = int(val)
+            sink._last.clear()
+        elif name == "noise_floor_db" and an is not None:
+            an.noise_floor_db = float(val)
         elif name == "gamma":
             sink.gamma = val
             sink._last.clear()          # force a redraw at the new curve
@@ -117,12 +122,12 @@ def _identify(sink) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="rigby", description=__doc__)
-    ap.add_argument("--look", default="spectrum", choices=sorted(LOOKS))
+    ap.add_argument("--look", default="auto", choices=sorted(LOOKS))
     ap.add_argument("--palette", default="sunset",
                     choices=["sunset", "cyanmag", "acid", "ice"])
     ap.add_argument("--duo", default="ember",
                     choices=["ember", "toxic", "vapor", "cobalt", "mono"],
-                    help="two-tone pair for the duotone look")
+                    help="two-tone pair for duotone, rain, and prism")
     ap.add_argument("--config", default=None,
                     help=f"rig config file (default {default_path()})")
     ap.add_argument("--probe", metavar="ZONE",
@@ -146,6 +151,10 @@ def main() -> int:
     ap.add_argument("--master", type=float, default=1.0,
                     help="grand master 0..1")
     ap.add_argument("--gamma", type=float, default=2.2)
+    ap.add_argument("--min-lit", type=int, default=3,
+                    help="visibility toe in LED output units, 0 disables it")
+    ap.add_argument("--noise-floor-db", type=float, default=-72.0,
+                    help="minimum input level for the signal gate, in dBFS")
     ap.add_argument("--gain", type=float, default=1.6,
                     help="pre-curve drive on control signals")
     ap.add_argument("--curve", type=float, default=0.45,
@@ -187,6 +196,12 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=6742)
     args = ap.parse_args()
+    if not 1 <= args.fps <= 240:
+        ap.error('--fps must be between 1 and 240')
+    if not -120 <= args.noise_floor_db <= -20:
+        ap.error('--noise-floor-db must be between -120 and -20')
+    if not 0 <= args.min_lit <= 20:
+        ap.error('--min-lit must be between 0 and 20')
 
     cfg_path = Path(args.config) if args.config else default_path()
     cfg = RigConfig.load(cfg_path)
@@ -195,7 +210,7 @@ def main() -> int:
     given = {a.split("=")[0].lstrip("-").replace("-", "_") for a in sys.argv[1:]}
     try:
         sink = Sink(args.host, args.port, gamma_val=args.gamma,
-                    master=args.master, groups=cfg.groups,
+                    master=args.master, min_lit=args.min_lit, groups=cfg.groups,
                     overrides=cfg.fixtures)
     except Exception as e:
         print(f"cannot reach OpenRGB SDK at {args.host}:{args.port} -- "
@@ -218,6 +233,7 @@ def main() -> int:
     params = Params(look=args.look, duo=args.duo, palette=args.palette,
                     hit_style=args.hit_style, master=args.master,
                     gain=args.gain, curve=args.curve, gamma=args.gamma,
+                    min_lit=args.min_lit, noise_floor_db=args.noise_floor_db,
                     saturation=args.saturation, hot=args.hot,
                     hue_drift=args.hue_drift, dynamics_db=args.dynamics_db,
                     onset_k=args.onset_k,
@@ -227,11 +243,9 @@ def main() -> int:
     def build_look():
         kw = {"palette": params.palette, "gain": params.gain,
               "curve": params.curve}
-        if params.look in ("duotone", "rain", "auto"):
-            kw.update(duo=params.duo, hue_drift=params.hue_drift,
-                      hit_style=params.hit_style,
-                      swing_min_beats=params.swing_min_beats,
-                      saturation=params.saturation, hot=params.hot)
+        kw.update(duo=params.duo, hue_drift=params.hue_drift,
+                  hit_style=params.hit_style, swing_min_beats=params.swing_min_beats,
+                  saturation=params.saturation, hot=params.hot)
         return LOOKS[params.look](sink.fixtures, **kw)
 
     look = build_look()
@@ -257,7 +271,7 @@ def main() -> int:
                 play = False
             an = Analyzer(args.source, fps=args.fps, offset_ms=args.offset_ms,
                           play=play, dynamics_db=args.dynamics_db,
-                          onset_k=args.onset_k)
+                          onset_k=args.onset_k, noise_floor_db=args.noise_floor_db)
             an.start()
             print(f"listening: {an.source}"
                   + ("  (playing)" if play else "")
@@ -320,6 +334,7 @@ def main() -> int:
                       bass=0.25, onset=False, flux=0.0, swell=0.45)
     dt = 1.0 / args.fps
     started = time.monotonic()
+    last_step = None
 
     try:
         while running:
@@ -366,8 +381,12 @@ def main() -> int:
                 else:
                     _apply_live(look, an, sink, params, dirty)
 
+            now_step = time.monotonic()
             if not params.pause:
-                look.step(dt, f)
+                step_dt = (dt if last_step is None or (an is not None and not an._realtime)
+                           else max(0., now_step-last_step))
+                look.step(step_dt, f)
+            last_step = now_step
             if sink.raw != params.playground:
                 sink.raw = params.playground
                 sink._last.clear()          # curve changed; force a redraw
@@ -396,7 +415,7 @@ def main() -> int:
                         frame[name][led] = (1.0, 1.0, 1.0)
 
             if args.meter:
-                _meter(f, frame)
+                _meter(f, sink.preview(frame))
             else:
                 sink.write(frame)
 
@@ -410,12 +429,17 @@ def main() -> int:
                 # the rig no matter how often the browser asked.
                 if now - last_pub >= 1.0 / PUBLISH_HZ:
                     last_pub = now
-                    telem.set(frame=_frame_hex(frame), fps=fps_now,
+                    preview = sink.preview(frame)
+                    telem.set(frame=_frame_hex(preview), fps=fps_now,
                               dbfs=(20 * np.log10(max(f.rms, 1e-9))),
                               level=f.level, dynamics=f.dynamics,
                               swell=f.swell, pulse=f.pulse, onset=bool(f.onset),
+                              presence=f.presence, bpm=f.bpm, beat_phase=f.beat_position % 1,
+                              bar_confidence=f.bar_confidence, density=f.density,
+                              scene=look.director.scene, analysis_age_ms=f.analysis_age_ms,
+                              write_ms=sink.write_ms,
                               bands=[float(x) for x in f.bands],
-                              out=max((float(v.max()) for v in frame.values()),
+                              out=max((float(v.max()) for v in preview.values()),
                                       default=0.0))
 
             if args.seconds and time.monotonic() - started >= args.seconds:

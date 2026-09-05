@@ -12,7 +12,8 @@ import collections
 import numpy as np
 
 from . import fx
-from .analyze import Features
+from .analyze import Features, Onset
+from .music import Director, alpha
 from .patch import Fixture
 
 
@@ -52,8 +53,15 @@ class Look:
         self.hot = hot
         self.t = 0.0          # global time in turns
         self.chase = 0.0      # chase phase in turns
+        self._motion = 0.0
+        self._energy = 0.0    # rhythmic activity, independent of relative swell
         self._hit = 0.0       # onset flash envelope
-        self._lvl = 0.0       # heavily smoothed level, for chase rate
+        self._lvl = 0.0
+        self.director = Director()
+        self._music_beats = 0.0
+        self._events = ()
+        self._event = None
+        self._low_hit = self._mid_hit = self._high_hit = 0.0
 
     def tones(self) -> tuple[float, float, float]:
         """Current (primary, secondary, accent) hues.
@@ -68,15 +76,44 @@ class Look:
         return base, (base + sep) % 1.0, (base + self._acc) % 1.0
 
     def step(self, dt: float, f: Features) -> None:
-        # Rate rides on energy -- but on a *heavily* smoothed level. Driving it
-        # from the raw level made the chase speed jitter frame to frame, which
-        # reads as judder rather than movement.
-        self._lvl += (f.level - self._lvl) * 0.04
+        self._lvl += (f.level - self._lvl) * alpha(dt, .4)
+        # Density measures accepted attacks, not tempo confidence: syncopated
+        # drums should still have weight when the beat clock cannot lock.
+        activity = np.clip((f.density - .12) / .30, 0., 1.)
+        activity *= np.clip((f.dynamics - .35) / .45, 0., 1.) * f.presence
+        self._energy += (activity - self._energy) * alpha(dt, .65 if activity > self._energy else 1.2)
+        self.director.step(dt, f, energy=self._energy)
         self._hue_t += dt * self.HUE_DRIFT * self._drift
         self._sep_t += dt * self.SEP_DRIFT * self._drift
-        self.t += dt * 0.05
-        self.chase += dt * (0.22 + self._lvl * 1.1)
-        self._hit = max(self._hit * 0.82, 1.0 if f.onset else 0.0)
+        self.t += dt * .015
+        tempo = f.bpm / 60 if f.bpm and f.pulse > .2 else .4
+        self._music_beats += dt * tempo
+        if f.pulse > .4:
+            error = (f.beat_position - self._music_beats + 2) % 4 - 2
+            self._music_beats += float(np.clip(error * alpha(dt, .5), -dt * .4, dt * .4))
+        self.chase = self._music_beats / 4
+        self._motion += dt * tempo / 4 * (1. + 3. * self._energy)
+        self._since_swing += dt * tempo
+        events = f.events
+        if not events and f.onset:   # supports hand-built feature streams
+            events = (Onset(f.timestamp, f.onset_strength, .7, 'low'),)
+        self._events = tuple(e for e in events if e.confidence >= .45 and f.presence > .3
+                             and f.timestamp - e.time <= .15)
+        self._event = max(self._events, key=lambda e: e.strength * e.confidence
+                          * (0.4 if e.kind == 'high' else 1.), default=None)
+        for kind, tau in (('low', .22), ('mid', .12), ('high', .07)):
+            name = '_' + kind + '_hit'
+            hit = max((self._impact(e, f, tau)
+                       for e in self._events if e.kind == kind), default=0.)
+            setattr(self, name, max(getattr(self, name) * np.exp(-dt / tau), hit))
+        self._hit = max(self._low_hit, self._mid_hit * .75, self._high_hit * .25)
+
+    def _impact(self, event, f, tau):
+        # Preserve the detector's first 40 ms of latency without replaying old
+        # hits. Confidence already gates events; avoid squaring its attenuation.
+        age = max(0., f.timestamp - event.time - .04)
+        return min(1., event.strength * event.confidence
+                   * (1. + 1.6 * self._energy)) * np.exp(-age / tau)
 
     @staticmethod
     def _hit_scale(f: Features) -> float:
@@ -95,7 +132,6 @@ class Look:
         """
         impact = f.onset_strength * (0.3 + 0.7 * f.dynamics)
         self._impacts.append(impact)
-        self._since_swing += 1
 
         if self._since_swing < self.swing_min_beats:
             self._swing_now = False
@@ -139,7 +175,8 @@ class Look:
         # Ordinary beats keep the plain flash; only the ones that earned it
         # swing the colour over.
         if self.hit_style == "white" or not self._swing_now:
-            return rgb + self.col(hacc, mask * lum_scale, sat=0.45)
+            sat = 0.0 if self.hit_style == "white" else .8
+            return fx.mix_layers(rgb, self.col(hacc, mask * lum_scale, sat=sat), ceiling=1.0)
 
         # Colour weight and brightness are separate: the hue swings all the way
         # over even in a quiet passage, and `lum_scale` decides how hard it
@@ -179,16 +216,22 @@ class Look:
 
 
 class Spectrum(Look):
-    """Bands spread along the trusses, mirrored; bass in the RAM; hits flash white."""
+    """A spectral wash with moving space and local percussive highlights."""
 
     name = "spectrum"
+
+    def _spectral_motion(self):
+        return self._motion
+
+    def _spectral_energy(self):
+        return self._energy
 
     def render(self, f: Features) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}
         nb = len(f.bands)
 
         for key, fix in self.fixtures.items():
-            if fix.slow or key == "mobo":
+            if key in ("mobo", "ram_a", "ram_b", "gpu"):
                 continue
 
             # The wash comes off the SLOW envelope and is smeared across
@@ -198,24 +241,33 @@ class Spectrum(Look):
             # The slow envelope lags transients and so reads lower than the
             # fast one; lift it back up rather than losing overall brightness.
             b = np.interp(fix.pos, np.linspace(0, 1, nb), f.bands_slow)
-            b = np.clip(fx.blur(b, 2) * 1.35, 0.0, 1.0)
-            accent = np.interp(fix.pos, np.linspace(0, 1, nb), f.bands)
+            b = fx.blur(b, 2)
+            accent = (b if fix.slow else np.interp(fix.pos, np.linspace(0, 1, nb), f.bands))
             accent = fx.blur(accent, 1)
 
             # Movement layer: a travelling bump so it never sits still.
-            mv = fx.wave("bump", self.chase, fix.pos, spread=1.0, size=1.0)
+            mv = fx.wave("bump", self._spectral_motion(), fix.pos, spread=1.0, size=1.0)
 
+            energy = 0. if fix.slow else self._spectral_energy()
+            # Carve moving space into the wash, then let actual band attacks
+            # fill it. More level alone does not flatten the whole fixture.
+            b = b * (1. - .48 * energy * (1. - mv))
+            transient = np.maximum(accent - b, 0.)
             v = fx.htp(b, accent * 0.45, mv * 0.30 * (0.3 + self._lvl))
+            v += transient * energy * 1.2
             v = self.drive(v) * f.dynamics
-            v = np.maximum(v, self._hit * 0.9 * self._hit_scale(f))
+            local_hit = (self._low_hit * (1-fix.pos) ** 2 + self._mid_hit
+                         * np.exp(-((fix.pos-.5)/.18)**2) + self._high_hit * fix.pos**4 * .25)
+            if not fix.slow:
+                v = v + (1. - v) * np.clip(local_hit * (1. + energy), 0., 1.) * self._hit_scale(f) * f.presence
 
             hue = (fx.palette_hue(self.palette, self.t) + fix.pos * 0.22) % 1.0
-            sat = np.clip(1.0 - self._hit * 0.85, 0.0, 1.0)
+            sat = np.clip(1.0 - self._hit * 0.25, 0.0, 1.0)
             out[key] = fx.hsv(hue, sat, v)
 
         if (fix := self.fixtures.get("mobo")) is not None:
             v = self.drive(np.full(fix.n, 0.18 + f.level * 0.82)) * f.dynamics
-            v = np.maximum(v, self._hit * self._hit_scale(f))
+            v = np.maximum(v, self._low_hit * .45 * f.presence)
             hue = fx.palette_hue(self.palette, self.t + 0.25)
             out["mobo"] = fx.hsv(hue, 1.0 - self._hit * 0.8, v)
 
@@ -232,9 +284,84 @@ class Spectrum(Look):
         if (fix := self.fixtures.get("gpu")) is not None:
             hue = fx.palette_hue(self.palette, self.t + 0.5)
             out["gpu"] = fx.hsv(hue, 0.9,
-                                self.drive(np.full(1, 0.12 + f.level * 0.88))
+                                self.drive(np.full(fix.n, 0.12 + f.level * 0.88))
                                 * f.dynamics)
 
+        return out
+
+
+class Prism(Spectrum):
+    """Spectrum's dynamics with travelling two-tone colour and larger swings."""
+
+    name = "prism"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._colour_target = 0.0
+        self._colour = 0.0
+        self._slow_colour = 0.0
+        self._since_colour = 999.0
+        self._lift_armed = True
+        self._engagement = 1.0
+        self._prism_phase = 0.0
+
+    def _spectral_motion(self):
+        return self._prism_phase
+
+    def _spectral_energy(self):
+        return self._energy * self._engagement
+
+    def step(self, dt, f):
+        super().step(dt, f)
+        # Density has a long tail after a busy section. Relative loudness
+        # pulls back independently, before that history has time to decay.
+        target = min(float(np.clip((f.dynamics - .4) / .4, 0., 1.)),
+                     float(np.clip((f.swell - .28) / .24, 0., 1.))) * f.presence
+        self._engagement += (target - self._engagement) * alpha(dt, .2 if target > self._engagement else .25)
+        tempo = f.bpm / 60 if f.bpm and f.pulse > .2 else .4
+        self._prism_phase += dt * tempo * (.005 + .075 * self._spectral_energy())
+        self._since_colour += dt
+        if f.energy_slope < .02:
+            self._lift_armed = True
+        lift = (self._lift_armed and f.energy_slope > .06
+                and f.swell > .55 and f.presence > .3)
+        accent = False
+        if (self._event is not None and self._event.kind != 'high'
+                and self._event.strength * self._event.confidence >= .6
+                and f.dynamics > .65 and f.swell > .45):
+            self.note_onset(f)
+            accent = self._swing_now
+        if (lift or accent) and self._since_colour >= 6.:
+            # Move the entire colour family, then settle into it. A sustained
+            # build earns one change, not a fresh palette every render frame.
+            self._colour_target += .19
+            self._since_colour = 0.0
+            if lift:
+                self._lift_armed = False
+        self._colour += (self._colour_target - self._colour) * alpha(dt, .8)
+        self._slow_colour += (self._colour_target - self._slow_colour) * alpha(dt, 1.1)
+
+    def render(self, f):
+        spectral = super().render(f)
+        h1, h2, _ = self.tones()
+        out = {}
+        for key, fix in self.fixtures.items():
+            # Retain headroom in breakdowns, without reducing the full-level
+            # spectral response. A single slow colour field keeps the rig calm.
+            v = spectral[key].max(axis=1) * (.65 + .35 * self._engagement)
+            shift = self._slow_colour if fix.slow else self._colour
+            pos = fix.angle if fix.is_ring else fix.pos
+            phase = self._prism_phase * (.5 if fix.slow else fix.spin)
+            ribbon = .5 + .5 * np.cos(2 * np.pi * (pos - phase))
+            pair = (self.col((h1 + shift) % 1., v) * ribbon[:, None]
+                    + self.col((h2 + shift) % 1., v) * (1. - ribbon[:, None]))
+            hue = (fx.palette_hue(self.palette, self.t) + fix.pos * .10 + shift) % 1.
+            base = self.col(hue, v)
+            amount = (.10 if fix.slow else .08 + .20 * self._spectral_energy())
+            rgb = base * (1. - amount) + pair * amount
+            # Mixing complementary colours must not become a hidden dimmer.
+            peak = rgb.max(axis=1)
+            out[key] = rgb * (v / np.maximum(peak, 1e-9))[:, None]
         return out
 
 
@@ -268,20 +395,20 @@ class _Gesture:
 
     def __init__(self, name: str, rng: np.random.Generator, n_rings: int):
         self.name = name
-        self.rate = float(rng.uniform(0.6, 1.5))
+        self.rate = float(rng.choice([.5, 1., 2.]))
         self.width = float(rng.uniform(0.13, 0.24))
         self.lobes = int(rng.integers(2, 4))
         self.dir = 1.0 if rng.random() < 0.5 else -1.0
         self.spread = float(rng.choice([0.0, 1.0 / max(n_rings, 1), 0.5]))
         self._seed = int(rng.integers(0, 1 << 30))
 
-    def field(self, ang, phase, t, idx, lo, hi):
+    def field(self, ang, phase, t, idx, lo, hi, expansion=.5, low_hit=0.):
         """Returns (tone0, tone1) intensity across the ring."""
         ph = phase * self.rate * self.dir + idx * self.spread
         # On a 6-LED fan a 0.15-turn arc is barely one LED, which reads as
         # blinking rather than sweeping. Never let an arc span less than about
         # one and a half LEDs.
-        w = max(self.width, 1.5 / max(ang.size, 1))
+        w = max(self.width * (.7 + expansion * .8 + low_hit * .4), 1.5 / max(ang.size, 1))
 
         if self.name == "spin":
             return (fx.arc(ang, ph, w, 1.3) * (0.35 + 0.65 * lo),
@@ -361,52 +488,58 @@ class Duotone(Look):
         self._flash = 0.0
         self._flash_key = None
         self._flash_centre = 0.0
+        self._flash_kind = "low"
         self._rings = [k for k, f in fixtures.items() if f.is_ring]
         self._rng = np.random.default_rng(20260821)
         self._g = _Gesture("spin", self._rng, len(self._rings))
         self._g_prev = self._g
         self._xf = 1.0          # crossfade into the current gesture
         self._since_change = 0.0
+        self._phrase = -1
 
-    PHRASE_BEATS = 16     # change gesture on a phrase boundary...
-    IDLE_CHANGE_S = 14.0  # ...or on a timer when there is no beat to count
-    XFADE_S = 0.7
+    XFADE_S = .8
 
-    def _new_gesture(self) -> None:
-        choices = [g for g in _Gesture.NAMES if g != self._g.name]
-        name = str(self._rng.choice(choices))
-        self._g_prev, self._g = self._g, _Gesture(name, self._rng,
-                                                  len(self._rings))
+    def _new_gesture(self):
+        vocabulary = {
+            'sparse': ('breathe', 'converge'),
+            'groove': ('spin', 'pingpong', 'lobes'),
+            'build': ('converge', 'wipe'),
+            'full': ('lobes', 'spin', 'sparkle'),
+        }
+        choices = [name for name in vocabulary[self.director.scene] if name != self._g.name]
+        name = str(self._rng.choice(choices or vocabulary[self.director.scene]))
+        self._g_prev, self._g = self._g, _Gesture(name, self._rng, len(self._rings))
+        if self._energy > .35:
+            self._g.rate = float(self._rng.choice([2., 4.]))
+            self._g.width *= .75
         self._xf = 0.0
         self._since_change = 0.0
 
-    def step(self, dt: float, f: Features) -> None:
+    def step(self, dt, f):
         super().step(dt, f)
-        self.spin += dt * (0.10 + self._lvl * 0.42) * self.dir
+        self.spin = self.chase
+        self.beat = int(np.floor(f.beat_position))
         self._since_change += dt
-        self._xf = min(1.0, self._xf + dt / self.XFADE_S)
-
-        # On beaty material change at a phrase boundary; with no usable beat,
-        # fall back to a timer so it still evolves.
-        if f.pulse < 0.35 and self._since_change > self.IDLE_CHANGE_S:
+        fade = self.XFADE_S * (1. - .6 * self._energy)
+        self._xf = min(1., self._xf + dt / fade)
+        phrase = int(np.floor((f.beat_position - f.bar_offset) / 16))
+        refresh = (self._energy > .35 and self._since_change >= 6.
+                   and ((f.pulse > .4 and phrase != self._phrase)
+                        or (f.pulse <= .4 and self._since_change >= 12.)))
+        self._phrase = phrase
+        if self.director.changed or refresh:
             self._new_gesture()
-
-        if f.onset:
-            self.beat += 1
+        self._flash *= np.exp(-dt / .15)
+        if self._event:
             self.note_onset(f)
-            if self.beat % self.PHRASE_BEATS == 0:
-                self._new_gesture()
+            event = self._event
+            self._flash = max(self._flash, self._impact(event, f, .15))
             if self._rings:
-                # Cycle which ring takes the hit, and alternate which half.
-                self._flash_key = self._rings[self.beat % len(self._rings)]
-                self._flash_centre = 0.0 if self.beat % 2 else 0.5
-            # Structure: every fourth beat the whole rig reverses. Small change,
-            # but it's what stops a loop of four bars looking like one bar.
-            if self.beat % 4 == 0:
-                self.dir *= -1.0
-        # Peak on the onset frame itself -- decaying in the same frame meant a
-        # hit never reached full strength.
-        self._flash = max(self._flash * 0.80, 1.0 if f.onset else 0.0)
+                self._flash_key = self._rings[(int(np.floor(self._music_beats * 2))
+                                                + (1 if event.kind == "mid" else 0)) % len(self._rings)]
+                self._flash_centre = (0.0 if event.kind == 'low' else
+                                      .5 if event.kind == 'mid' else .25)
+            self._flash_kind = event.kind
 
     def _ring_rgb(self, key, fix, f) -> np.ndarray:
         ang = fix.angle
@@ -419,19 +552,24 @@ class Duotone(Look):
         lo = float(f.bands_slow[min(idx, nb - 1)])
         hi = float(f.bands_slow[min(nb - 1 - idx, nb - 1)])
 
-        a1, a2 = self._g.field(ang, phase, self._since_change, idx, lo, hi)
+        a1, a2 = self._g.field(ang, phase, self._since_change, idx, lo, hi, self.director.expansion, self._low_hit)
         if self._xf < 1.0:
             p1, p2 = self._g_prev.field(ang, phase, self._since_change, idx,
-                                        lo, hi)
+                                        lo, hi, self.director.expansion, self._low_hit)
             a1 = a1 * self._xf + p1 * (1.0 - self._xf)
             a2 = a2 * self._xf + p2 * (1.0 - self._xf)
 
         h1, h2, hacc = self.tones()
-        rgb = (self.col(h1, self.drive(a1)) +
-               self.col(h2, self.drive(a2), sat=0.95))
+        # Expansion recruits fixtures gradually; a sparse scene keeps dark space.
+        coverage = np.clip(max(self.director.expansion, self._energy) * len(self._rings) - idx + 1, .15, 1.)
+        a1 *= coverage
+        a2 *= coverage
+        rgb = fx.mix_layers(self.col(h1, self.drive(a1)),
+                            self.col(h2, self.drive(a2), sat=.95))
 
-        if self._flash > 0.01 and key == self._flash_key:
-            m = fx.half(ang, self._flash_centre) * self._flash
+        if self._flash > 0.01 and key == self._flash_key and not fix.slow:
+            m = (fx.arc(ang, self._flash_centre, .12) * .3 if self._flash_kind == 'high'
+                 else fx.half(ang, self._flash_centre)) * self._flash
             rgb = self.apply_hit(rgb, m, h1, h2, hacc, self.beat,
                                  lum_scale=self._hit_scale(f))
 
@@ -448,12 +586,11 @@ class Duotone(Look):
         wash = fx.blur(wash, 1) if fix.n > 3 else wash
         h1, h2, hacc = self.tones()
         v = self.drive(np.clip(0.14 + wash * 0.9, 0, 1))
-        rgb = (self.col(h1, v * (1.0 - mix)) +
-               self.col(h2, v * mix, sat=0.95))
-        if self._flash > 0.01:
-            rgb = rgb + fx.hsv(hacc, 0.5,
-                               np.full(fix.n, self._flash * 0.35
-                                       * self._hit_scale(f)))
+        rgb = fx.mix_layers(self.col(h1, v * (1.0 - mix)),
+                            self.col(h2, v * mix, sat=.95))
+        if self._flash > .01 and not fix.slow and self._flash_kind == 'mid':
+            mask = np.exp(-((fix.pos-.5)/.2)**2) * self._flash * .35
+            rgb = fx.mix_layers(rgb, self.col(hacc, mask * self._hit_scale(f)), ceiling=1.)
         return np.clip(rgb * f.dynamics, 0.0, 1.0)
 
     def render(self, f: Features) -> dict[str, np.ndarray]:
@@ -488,8 +625,11 @@ class _Drops:
         self.age = np.zeros(0, dtype=np.float32)
         self.hjit = np.zeros(0, dtype=np.float32)
         self.tone = np.zeros(0, dtype=np.int8)
+        self.accent_hue = np.zeros(0, dtype=np.float32)
+        self.accent_sat = np.zeros(0, dtype=np.float32)
+        self.punch = np.zeros(0, dtype=np.float32)
         self._idx = np.arange(n, dtype=np.float32)
-        self._next = 0.0
+        self._next = float(self.rng.exponential(1.0))
         # Peak of the attack/decay envelope, so `amp` still means peak height.
         a = np.linspace(0.0, self.CULL_S, 512)
         self._norm = float(((1 - np.exp(-a / self.ATTACK_S))
@@ -499,60 +639,66 @@ class _Drops:
         return ((1.0 - np.exp(-age / self.ATTACK_S))
                 * np.exp(-age / self.TAU_S)) / self._norm
 
-    def spawn(self, amp: float, tone: int | None = None) -> None:
+    def spawn(self, amp: float, tone: int | None = None, hue=0., age=0., sat=.9, punch=0.) -> None:
         self.pos = np.append(self.pos, self.rng.random() * self.n)
         self.amp = np.append(self.amp, amp)
-        self.age = np.append(self.age, 0.0)
+        self.age = np.append(self.age, age)
         # A little hue wander per drop, so a shower isn't one flat colour.
         self.hjit = np.append(self.hjit, self.rng.normal(0.0, 0.028))
         t = self.rng.integers(0, 2) if tone is None else tone
         self.tone = np.append(self.tone, np.int8(t))
+        self.accent_hue = np.append(self.accent_hue, hue)
+        self.accent_sat = np.append(self.accent_sat, sat)
+        self.punch = np.append(self.punch, punch)
 
     def step(self, dt: float, rate: float, amp: float) -> None:
-        # Exponential inter-arrival times -- real Poisson scatter. A fractional
-        # carry spawns at exactly even spacing, which at low rates reads as a
-        # metronome rather than as rain.
-        self._next -= dt * max(rate, 1e-6)
-        while self._next <= 0.0:
-            self._next += float(self.rng.exponential(1.0))
-            self.spawn(amp * float(self.rng.uniform(0.55, 1.0)))
-        self.age = self.age + dt
+        self.age += dt
+        if rate > 0:
+            self._next -= dt * rate
+            while self._next <= 0:
+                age = -self._next / rate
+                self.spawn(amp * float(self.rng.uniform(.55, 1.)), age=age)
+                self._next += float(self.rng.exponential(1.))
         keep = self.age < self.CULL_S
-        self.pos, self.amp, self.age, self.tone, self.hjit = (
-            self.pos[keep], self.amp[keep], self.age[keep],
-            self.tone[keep], self.hjit[keep])
+        self.pos, self.amp, self.age, self.tone, self.hjit, self.accent_hue, self.accent_sat, self.punch = (
+            a[keep] for a in (self.pos, self.amp, self.age, self.tone, self.hjit, self.accent_hue, self.accent_sat, self.punch))
 
-    def render(self, width: float = 0.85):
+    def render(self, width: float = 0.85, gain=1.6, curve=.45, saturation=.88, hot=.5):
         """Returns (tone0, tone1, tone2, hue_offset) fields."""
         out = [np.zeros(self.n, dtype=np.float32),
                np.zeros(self.n, dtype=np.float32),
                np.zeros(self.n, dtype=np.float32)]
         hue = np.zeros(self.n, dtype=np.float32)
+        accent = np.zeros((self.n, 3), dtype=np.float32)
         if self.pos.size:
             d = np.abs(self._idx[None, :] - self.pos[:, None])
             if self.wrap:
                 d = np.minimum(d, self.n - d)
+            envelope = ((1. - self.punch) * self._env(self.age)
+                        + self.punch * np.exp(-self.age / .18))
             g = (np.exp(-(d ** 2) / (2.0 * width ** 2))
-                 * (self.amp * self._env(self.age))[:, None])
+                 * (self.amp * envelope)[:, None])
             for t in (0, 1, 2):
                 m = self.tone == t
                 if m.any():
                     out[t] = g[m].sum(axis=0).astype(np.float32)
+            for j in np.flatnonzero(self.tone == 2):
+                v = fx.drive(g[j], gain, curve)
+                heat = np.clip((v - .5) / .5, 0, 1)
+                sat = self.accent_sat[j] * saturation * (1-hot*heat)
+                accent = fx.mix_layers(accent, fx.hsv(self.accent_hue[j], sat, v), ceiling=1.)
             tot = g.sum(axis=0)
             hue = np.where(tot > 1e-6,
                            (g * self.hjit[:, None]).sum(axis=0) / np.maximum(tot, 1e-6),
                            0.0).astype(np.float32)
-        return out[0], out[1], out[2], hue
+        return out[0], out[1], accent, hue
 
 
 class Rain(Look):
-    """Pitter-patter that ramps into a wash -- for music with no usable beat.
+    """Gentle swell-driven drops with sharp splashes on percussive material.
 
-    Slow melodic material defeats beat detection: the onset envelope has no
-    periodicity to lock onto, so anything driven by beats either sits still or
-    invents a pulse that isn't there. This look ignores beats almost entirely
-    and is driven by `swell` -- sustained loudness -- so a quiet verse is a few
-    scattered drops and a belted chorus fills the rig in.
+    Density supplies rhythmic intensity even when syncopation prevents a beat
+    lock. Sustained material keeps the slower attack and decay of ordinary rain.
     """
 
     name = "rain"
@@ -579,21 +725,32 @@ class Rain(Look):
 
     def step(self, dt: float, f: Features) -> None:
         super().step(dt, f)
-        self._sw += (f.swell - self._sw) * 0.06
-        if f.onset:
-            self._beats += 1
-            self.note_onset(f)
+        self._sw += (f.swell - self._sw) * alpha(dt, .25)
+        self._beats = int(np.floor(f.beat_position))
         s = self._eff(self._sw)
-        rate = self.BASE_RATE + s * self.PEAK_RATE
-        amp = 0.45 + 0.55 * s
+        rate = (self.BASE_RATE + s * self.PEAK_RATE) * f.presence
+        amp = .30 + .55 * s
         for key, d in self.drops.items():
-            fixt = self.fixtures[key]
-            r = rate * (0.45 if fixt.slow else 1.0)   # i2c fixtures stay calm
-            d.step(dt, r, amp)
-            if f.onset:
-                # Tone 2 is the beat drop; it renders in the swung hue rather
-                # than as another white-ish blob.
-                d.spawn(min(1.0, amp * 1.4 + 0.25), tone=2)
+            d.step(dt, rate * (.45 if self.fixtures[key].slow else 1.), amp)
+        # One local accent, with strong evidence when there is no tracked rhythm.
+        event = self._event
+        if event and (self._energy > .3 or f.pulse > .4 or (event.confidence >= .9 and event.strength >= .6)):
+            keys = [k for k, fix in self.fixtures.items() if not fix.slow]
+            if keys:
+                self.note_onset(f)
+                h1, h2, hacc = self.tones()
+                hue = self.hit_hue(h1, h2, hacc, self._beats) if self._swing_now else hacc
+                index = int(np.floor(self._music_beats * 2)) + (1 if event.kind == 'mid' else 0)
+                # A kick splashes across a pair on energetic material. Hats
+                # stay small and local; slow bus fixtures retain their wash.
+                count = 2 if self._energy > .6 and event.kind == 'low' else 1
+                for offset in range(min(count, len(keys))):
+                    key = keys[(index + offset) % len(keys)]
+                    impact = self._impact(event, f, .18)
+                    self.drops[key].spawn((amp + .65 * self._energy) * impact
+                                          * (.5 if event.kind == 'high' else 1.),
+                                          tone=2, hue=hue, punch=self._energy,
+                                          sat=0. if self.hit_style == 'white' else .9)
 
     def _eff(self, sw: float) -> float:
         """Swell shaped for density: flat until the music actually lifts."""
@@ -611,16 +768,13 @@ class Rain(Look):
             # Wider blobs on the coarse 6-LED fan rings, or a drop is just one
             # LED blinking on and off.
             w = 0.7 if fixt.n >= 12 else 1.05
-            t0, t1, t2, hj = self.drops[key].render(width=w)
+            t0, t1, accent, hj = self.drops[key].render(width=w, gain=self.gain, curve=self.curve,
+                                                            saturation=self.saturation, hot=self.hot)
             v0 = self.drive(np.clip(t0 + ambient, 0, 1))
             v1 = self.drive(np.clip(t1 + ambient * 0.6, 0, 1))
-            rgb = (self.col((h1 + hj) % 1.0, v0, sat=0.95) +
-                   self.col((h2 + hj) % 1.0, v1, sat=0.90))
-            if t2.max() > 1e-3:
-                hh = (self.hit_hue(h1, h2, hacc, self._beats)
-                      if self._swing_now else hacc)
-                sat = 1.0 if self._swing_now else 0.5
-                rgb = rgb + self.col(hh, self.drive(np.clip(t2, 0, 1)), sat=sat)
+            rgb = fx.mix_layers(self.col((h1 + hj) % 1.0, v0, sat=.95),
+                                self.col((h2 + hj) % 1.0, v1, sat=.90))
+            rgb = fx.mix_layers(rgb, accent, ceiling=1.)
             out[key] = np.clip(rgb * f.dynamics, 0.0, 1.0)
         return out
 
@@ -651,13 +805,18 @@ class Auto(Look):
     def step(self, dt: float, f: Features) -> None:
         self.beaty.step(dt, f)
         self.calm.step(dt, f)
-        self.mix += (f.pulse - self.mix) * 0.03
+        self.director = self.beaty.director
+        rhythmic = float(np.clip((f.pulse - .25) / .5, 0, 1))
+        # The director already controls coverage inside Duotone. Applying it
+        # again here dims the entire show, even with a confidently tracked beat.
+        target = rhythmic
+        self.mix += (target - self.mix) * alpha(dt, .8)
 
     def render(self, f: Features) -> dict[str, np.ndarray]:
         w = float(np.clip(self.mix, 0.0, 1.0))
         a = self.beaty.render(f)
         b = self.calm.render(f)
-        return {k: np.clip(a[k] * w + b[k] * (1.0 - w), 0.0, 1.0) for k in a}
+        return {k: fx.crossfade(a[k], b[k], w) for k in a}
 
 
-LOOKS = {c.name: c for c in (Spectrum, Chase, Duotone, Rain, Auto)}
+LOOKS = {c.name: c for c in (Spectrum, Prism, Chase, Duotone, Rain, Auto)}

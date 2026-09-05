@@ -32,6 +32,8 @@ class Params:
     gain: float = 1.6
     curve: float = 0.45
     gamma: float = 2.2
+    min_lit: int = 3
+    noise_floor_db: float = -72.0
     saturation: float = 0.88
     hot: float = 0.5
     hue_drift: float = 1.0
