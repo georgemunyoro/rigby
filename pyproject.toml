@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 rigby = "rigby.__main__:main"
+rigby-editor = "rigby.editor_server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

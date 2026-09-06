@@ -86,6 +86,7 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>rigby</title>
+<link rel="icon" href="data:,">
 <style>
 __FONTCSS__
 :root{
@@ -280,6 +281,8 @@ pre{font:400 11px/1.7 var(--mono);color:var(--paper-3);white-space:pre-wrap;marg
     <span class="beat" id="p_beat" title="beat"></span>
   </div>
   <div class="spacer"></div>
+  <a class="btn" href="/rig-layout">Rig layout</a>
+  <a class="btn" href="/orchestrator">Orchestrator</a>
   <nav role="tablist" aria-label="Section">
     <button role="tab" data-tab="show" aria-selected="true">Show</button>
     <button role="tab" data-tab="devices" aria-selected="false">Devices</button>

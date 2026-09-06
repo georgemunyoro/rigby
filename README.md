@@ -377,6 +377,19 @@ at a time so you can read the physical order off the case.
 whole rig, so they're marked `slow` in `PATCH_SPEC` and get ~12fps plus a dirty
 check. Keep them as wash fixtures; put detail on the HID devices.
 
+## Orchestrator: editable track arrangements
+
+Run `uv run rigby-editor` for a standalone waveform/timeline editor, or open
+**Orchestrator** from the live desk to use your actual fixture map. Import local
+audio, generate a first arrangement, then edit look clips, property and RGB
+keyframes, and individual LED animations. Scrub, loop, save reusable clips, and
+play tracks as a set. Authored or locked regions survive automatic regeneration.
+
+The editor saves locally and exports portable JSON. Its proposal-review interface
+also supports edits from external tools or an LLM without granting them direct
+control of the lights. See [the orchestrator guide](docs/orchestrator.md) for
+playback, LED ownership, prepared analysis, and current limits.
+
 ## Musical behavior
 
 `auto` is the default look. It combines `duotone` movement with `rain` using both
@@ -533,3 +546,12 @@ position. Envelopes should use `music.alpha(dt, tau)` rather than frame constant
   reliable for hitting a drop on cue than hoping the onset detector agrees.
 - **Keyboard as a matrix.** The 126 keys have a `matrix_map`; right now they're
   treated as a 1D strip.
+
+The orchestrator also includes an optional **AI director**. Set `GEMINI_API_KEY`
+on the server, arrange your devices in **Physical rig layout**, then generate and
+refine lighting from actual song audio. Proposals can be auditioned before applying;
+locked passages stay protected. See the [AI setup and workflow](docs/orchestrator.md#ai-lighting-director).
+
+**Rig layout** is also available independently at `/rig-layout`, linked from the live desk. Arrange and save your physical devices there without opening an audio track or configuring AI.
+
+AI direction is docked beside the timeline: drag a waveform passage, choose **Suggest selection**, and compare saved/proposed lighting with A/B during playback. Spatial sweeps, ripples, mirrored motion, gradients, and ordered LED paths can span the physical rig.

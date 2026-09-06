@@ -150,6 +150,7 @@ class Rig:
     def __init__(self, geometry: dict, canvas: "Canvas"):
         self.geometry = geometry
         self.canvas = canvas
+        self.editor = None
 
 
 class Telemetry:
@@ -246,7 +247,20 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             self.end_headers()
             self.wfile.write(body)
 
+        def _editor_route(self, method):
+            if rig.editor is not None:
+                from .editor_server import route
+                rig.editor.identify = lambda fixture, led: devices.command(
+                    {"op": "identify", "fixture": fixture, "led": led, "seconds": 3}
+                )
+                return route(self, rig.editor, method)
+            return False
+
         def do_GET(self):
+            if self.path.split("?")[0] == "/favicon.ico":
+                return self._send(204, b"", "image/x-icon")
+            if self._editor_route('GET'):
+                return
             if self.path.startswith("/font/"):
                 return self._font(self.path[6:].split("?")[0])
             if self.path.startswith("/events"):
@@ -270,6 +284,8 @@ def _handler(params: Params, telem: Telemetry, patch_text: str,
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
+            if self._editor_route('POST'):
+                return
             if self.path.startswith("/devices"):
                 n = int(self.headers.get("Content-Length", 0) or 0)
                 try:

@@ -289,6 +289,12 @@ def main() -> int:
     telem = Telemetry()
     geometry = geometry_of(sink.fixtures)
     rig = Rig(geometry, Canvas(geometry))
+    if args.control:
+        from .orchestrator import Orchestrator
+        try:
+            rig.editor = Orchestrator(sink.fixtures)
+        except RuntimeError as e:
+            print(f"orchestrator unavailable: {e}", file=sys.stderr)
     devices = Devices(sink, cfg, cfg_path)
     control = None
     if args.control:
@@ -369,6 +375,9 @@ def main() -> int:
                 sink.rebuild(groups=cfg.groups, overrides=cfg.fixtures)
                 rig.geometry = geometry_of(sink.fixtures)
                 rig.canvas = Canvas(rig.geometry)
+                if rig.editor is not None:
+                    rig.editor.close()
+                    rig.editor = Orchestrator(sink.fixtures)
                 look = build_look()
                 print(f"\npatch rebuilt: "
                       f"{sum(f.n for f in sink.fixtures.values())} leds", flush=True)
@@ -400,6 +409,13 @@ def main() -> int:
                 look.render(f)
             else:
                 frame = look.render(f)
+            if rig.editor is not None and not params.playground:
+                rig.editor.output_settings = {'g': sink.gamma,
+                                              'master': 0. if params.blackout else sink.master,
+                                              'min_lit': sink.min_lit}
+                arranged = rig.editor.live_frame()
+                if arranged is not None:
+                    frame = arranged
             if params.blackout:
                 frame = {k: v * 0.0 for k, v in frame.items()}
 
@@ -450,6 +466,8 @@ def main() -> int:
         if an is not None:
             an.stop()
         sink.blackout()
+        if rig.editor is not None:
+            rig.editor.close()
         print("\nblackout.")
 
     return rc
